@@ -24,7 +24,7 @@ aes = "0.9"
 cbc = "0.1"
 des = "0.8"
 cipher = { version = "0.4", features = ["alloc", "block-padding"] }
-sha2 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.11", features = ["oid"] }
 sha1 = { version = "0.11", features = ["oid"] }
 signature = "2"
 flagset = "0.4"
