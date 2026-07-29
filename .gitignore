@@ -1,0 +1,9 @@
+/target
+# Local runtime state and secrets — never commit these.
+/ca/
+*.db
+*.db-shm
+*.db-wal
+.env
+config.toml
+.DS_Store
