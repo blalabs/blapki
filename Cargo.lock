@@ -180,7 +180,7 @@ dependencies = [
  "sha1 0.10.7",
  "sha2 0.10.9",
  "signature 2.2.0",
- "spki 0.7.3",
+ "spki 0.8.0",
  "sqlx",
  "thiserror",
  "time",

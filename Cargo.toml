@@ -14,7 +14,7 @@ cms = { version = "0.2.3", features = ["builder"] }
 x509-cert = { version = "0.3.0", features = ["builder", "hazmat", "pem"] }
 x509-ocsp = { version = "0.2", features = ["builder", "std"] }
 der = { version = "0.7", features = ["oid", "alloc", "pem"] }
-spki = "0.7"
+spki = "0.8"
 const-oid = { version = "0.9", features = ["db"] }
 pkcs8 = { version = "0.10", features = ["pem", "pkcs5", "encryption"] }
 pkcs5 = "0.8"
