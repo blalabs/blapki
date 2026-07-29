@@ -47,8 +47,7 @@ fn build_pkcsreq(
     csr_der: &[u8],
     txn: &str,
 ) -> Vec<u8> {
-    let env = envelope::build(csr_der, &ca.cert).unwrap();
-    let env_der = envelope::to_content_info_der(&env).unwrap();
+    let env_der = envelope::build(csr_der, &ca.cert).unwrap();
     let attrs = vec![
         attr::printable_attribute(attr::ID_MESSAGE_TYPE, MessageType::PkcsReq.as_value()).unwrap(),
         attr::printable_attribute(attr::ID_TRANSACTION_ID, txn).unwrap(),

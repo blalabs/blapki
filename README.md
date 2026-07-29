@@ -39,11 +39,42 @@ curl "http://localhost:8080/scep/test?operation=GetCACaps"
 # CA certificate (DER)
 curl "http://localhost:8080/scep/test?operation=GetCACert" -o ca.der
 openssl x509 -inform DER -in ca.der -noout -text
+```
 
-# Enrol with the sscep client through the static-challenge profile
+Enrol a device with the [sscep](https://github.com/certnanny/sscep) client
+through the static-challenge `test` profile. sscep does not generate the key or
+CSR, so create them with openssl first:
+
+```sh
+# 1. Device private key.
+openssl genrsa -out device.key 2048
+
+# 2. CSR carrying the SCEP challenge password. challengePassword must equal
+#    BLAPKI_TEST_CHALLENGE (the "test" profile's secret). The subjectAltName is
+#    optional; blapki copies it into the issued certificate.
+cat > device.cnf <<'EOF'
+[req]
+prompt = no
+distinguished_name = dn
+attributes = attrs
+req_extensions = exts
+[dn]
+CN = device-01
+[attrs]
+challengePassword = change-me
+[exts]
+subjectAltName = DNS:device-01.example.com
+EOF
+openssl req -new -key device.key -out device.csr -config device.cnf
+
+# 3. Fetch the CA certificate, then enrol (writes device.crt).
+sscep getca  -u http://localhost:8080/scep/test -c ca.crt
 sscep enroll -u http://localhost:8080/scep/test \
-  -c ca.der -k device.key -r device.csr -l device.crt \
-  -e 3 -S sha256
+  -c ca.crt -k device.key -r device.csr -l device.crt \
+  -E aes256 -S sha256
+
+# 4. Inspect the issued certificate.
+openssl x509 -in device.crt -noout -subject -issuer -ext subjectAltName
 ```
 
 ## Endpoints

@@ -165,8 +165,12 @@ async fn pki_operation(state: &Shared, profile: &str, body: &[u8]) -> AppResult<
 
     // Build the signed + enveloped CertRep for the device.
     let certs_only = degenerate::certs_only(&issued)?;
-    let reply_env = envelope::build(&certs_only, &parsed.signer_cert)?;
-    let reply_env_der = envelope::to_content_info_der(&reply_env)?;
+    let recipient = envelope::Recipient {
+        public_key: &parsed.recipient.public_key,
+        issuer: &parsed.recipient.issuer,
+        serial: &parsed.recipient.serial,
+    };
+    let reply_env_der = envelope::build_for(&certs_only, &recipient)?;
     let attrs = protocol::success_attrs(&parsed.transaction_id, &parsed.sender_nonce)?;
     sign::build_cert_rep(&ca.signing_key, &ca.cert, Some(&reply_env_der), attrs)
 }

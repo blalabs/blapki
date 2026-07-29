@@ -64,11 +64,14 @@ pub fn sha256_alg() -> AlgorithmIdentifierOwned {
 
 /// Extract an RSA public key from a certificate's `SubjectPublicKeyInfo`.
 pub fn rsa_public_key(cert: &Certificate) -> AppResult<RsaPublicKey> {
+    rsa_public_key_from_spki(&cert.tbs_certificate.subject_public_key_info)
+}
+
+/// Extract an RSA public key from a `SubjectPublicKeyInfo`.
+pub fn rsa_public_key_from_spki(spki: &spki::SubjectPublicKeyInfoOwned) -> AppResult<RsaPublicKey> {
     use rsa::pkcs1::DecodeRsaPublicKey;
-    let spki = &cert.tbs_certificate.subject_public_key_info;
-    let key_bytes = spki.subject_public_key.raw_bytes();
-    RsaPublicKey::from_pkcs1_der(key_bytes)
-        .map_err(|e| AppError::crypto(format!("certificate does not carry an RSA key: {e}")))
+    RsaPublicKey::from_pkcs1_der(spki.subject_public_key.raw_bytes())
+        .map_err(|e| AppError::crypto(format!("not an RSA key: {e}")))
 }
 
 fn der_err(e: der::Error) -> AppError {

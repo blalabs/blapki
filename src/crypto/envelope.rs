@@ -8,24 +8,37 @@
 //! symmetric-decrypt the content.
 
 use cipher::block_padding::Pkcs7;
-use cipher::{BlockDecryptMut, KeyIvInit};
-use cms::builder::{
-    ContentEncryptionAlgorithm, EnvelopedDataBuilder, KeyEncryptionInfo,
-    KeyTransRecipientInfoBuilder,
-};
-use cms::cert::IssuerAndSerialNumber;
-use cms::content_info::ContentInfo;
+use cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cms::content_info::{CmsVersion, ContentInfo};
 use cms::enveloped_data::{
-    EnvelopedData, KeyTransRecipientInfo, RecipientIdentifier, RecipientInfo,
+    EncryptedContentInfo, EnvelopedData, KeyTransRecipientInfo, RecipientIdentifier, RecipientInfo,
 };
 use const_oid::ObjectIdentifier;
-use der::asn1::{Any, OctetString};
-use der::{Decode, Encode};
-use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
+use der::asn1::{Any, Null, OctetString, SetOfVec};
+use der::{Decode, Encode, Sequence, Tag};
+use rand::RngCore;
+use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use spki::AlgorithmIdentifierOwned;
+use x509_cert::certificate::Raw;
+use x509_cert::name::Name;
+use x509_cert::serial_number::SerialNumber;
 use x509_cert::Certificate;
 
 use crate::crypto::{der_err, oids, rsa_public_key};
 use crate::error::{AppError, AppResult};
+
+/// A serial number decoded without the RFC 5280 20-octet cap. SCEP clients such
+/// as sscep use longer serials (a hex transaction id) in their self-signed
+/// signer certificate, and the reply must echo that serial exactly so the
+/// client's `PKCS7_decrypt` matches the recipient.
+pub type RawSerial = SerialNumber<Raw>;
+
+/// The recipient of an outbound `EnvelopedData` (the enrolling device).
+pub struct Recipient<'a> {
+    pub public_key: &'a RsaPublicKey,
+    pub issuer: &'a Name,
+    pub serial: &'a RawSerial,
+}
 
 /// Decrypt an `EnvelopedData` addressed to `ca_cert`/`ca_key` and return the
 /// recovered plaintext (for SCEP: the DER-encoded PKCS#10 CSR).
@@ -47,36 +60,105 @@ pub fn open(
     decrypt_symmetric(eci.content_enc_alg.oid, &cek, &iv, ciphertext)
 }
 
-/// Encrypt `plaintext` to a single recipient (`recipient_cert`) using
-/// AES-256-CBC and RSA key transport, returning the `EnvelopedData`.
-pub fn build(plaintext: &[u8], recipient_cert: &Certificate) -> AppResult<EnvelopedData> {
-    let rid = RecipientIdentifier::IssuerAndSerialNumber(issuer_and_serial(recipient_cert));
-    let pubkey = rsa_public_key(recipient_cert)?;
-
-    // The recipient builder needs an RNG to encrypt the CEK, and the enveloped
-    // builder needs one to generate the CEK+IV, so we make two handles.
-    let mut rng_recipient = rand::thread_rng();
-    let mut rng_content = rand::thread_rng();
-
-    let recipient =
-        KeyTransRecipientInfoBuilder::new(rid, KeyEncryptionInfo::Rsa(pubkey), &mut rng_recipient)
-            .map_err(builder_err)?;
-
-    let mut builder =
-        EnvelopedDataBuilder::new(None, plaintext, ContentEncryptionAlgorithm::Aes256Cbc, None)
-            .map_err(builder_err)?;
-    builder.add_recipient_info(recipient).map_err(builder_err)?;
-    builder
-        .build_with_rng(&mut rng_content)
-        .map_err(builder_err)
+/// The reply's `KeyTransRecipientInfo`, encoded by hand so the recipient serial
+/// is a plain (uncapped) INTEGER rather than the RFC 5280 `SerialNumber` used by
+/// the `cms` builder.
+#[derive(Sequence)]
+struct OutIssuerAndSerial {
+    issuer: Name,
+    serial_number: RawSerial,
 }
 
-/// Wrap an `EnvelopedData` in a `ContentInfo` and DER-encode it (the SCEP
-/// `pkcsPKIEnvelope` that becomes a `CertRep`'s message data).
-pub fn to_content_info_der(enveloped: &EnvelopedData) -> AppResult<Vec<u8>> {
+#[derive(Sequence)]
+struct OutKeyTransRecipientInfo {
+    version: CmsVersion,
+    rid: OutIssuerAndSerial,
+    key_enc_alg: AlgorithmIdentifierOwned,
+    enc_key: OctetString,
+}
+
+#[derive(Sequence)]
+struct OutEnvelopedData {
+    version: CmsVersion,
+    recip_infos: SetOfVec<Any>,
+    encrypted_content: EncryptedContentInfo,
+}
+
+/// Encrypt `plaintext` to a certificate recipient. Convenience wrapper used by
+/// tests; production code uses [`build_for`] with the parsed recipient.
+pub fn build(plaintext: &[u8], recipient_cert: &Certificate) -> AppResult<Vec<u8>> {
+    let public_key = rsa_public_key(recipient_cert)?;
+    let issuer = recipient_cert.tbs_certificate.issuer.clone();
+    let serial = SerialNumber::<Raw>::new(recipient_cert.tbs_certificate.serial_number.as_bytes())
+        .map_err(der_err)?;
+    build_for(
+        plaintext,
+        &Recipient {
+            public_key: &public_key,
+            issuer: &issuer,
+            serial: &serial,
+        },
+    )
+}
+
+/// Encrypt `plaintext` to `recipient` with AES-256-CBC + RSA key transport and
+/// return the DER of a `ContentInfo` wrapping the `EnvelopedData` (the SCEP
+/// `pkcsPKIEnvelope`).
+pub fn build_for(plaintext: &[u8], recipient: &Recipient) -> AppResult<Vec<u8>> {
+    let mut rng = rand::thread_rng();
+
+    // Content-encryption key + IV for AES-256-CBC.
+    let mut cek = [0u8; 32];
+    let mut iv = [0u8; 16];
+    rng.fill_bytes(&mut cek);
+    rng.fill_bytes(&mut iv);
+
+    let ciphertext = cbc::Encryptor::<aes::Aes256>::new_from_slices(&cek, &iv)
+        .map_err(|_| AppError::crypto("invalid AES key/IV length"))?
+        .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+
+    // RSA-wrap the CEK to the recipient.
+    let encrypted_key = recipient
+        .public_key
+        .encrypt(&mut rng, Pkcs1v15Encrypt, &cek)
+        .map_err(|e| AppError::crypto(format!("RSA key wrap failed: {e}")))?;
+
+    let ktri = OutKeyTransRecipientInfo {
+        version: CmsVersion::V0,
+        rid: OutIssuerAndSerial {
+            issuer: recipient.issuer.clone(),
+            serial_number: recipient.serial.clone(),
+        },
+        key_enc_alg: AlgorithmIdentifierOwned {
+            oid: const_oid::db::rfc5912::RSA_ENCRYPTION,
+            parameters: Some(Any::from(Null)),
+        },
+        enc_key: OctetString::new(encrypted_key).map_err(der_err)?,
+    };
+
+    let mut recip_infos = SetOfVec::new();
+    recip_infos
+        .insert(Any::encode_from(&ktri).map_err(der_err)?)
+        .map_err(der_err)?;
+
+    let encrypted_content = EncryptedContentInfo {
+        content_type: oids::ID_DATA,
+        content_enc_alg: AlgorithmIdentifierOwned {
+            oid: oids::ID_AES_256_CBC,
+            parameters: Some(Any::new(Tag::OctetString, iv.to_vec()).map_err(der_err)?),
+        },
+        encrypted_content: Some(OctetString::new(ciphertext).map_err(der_err)?),
+    };
+
+    let enveloped = OutEnvelopedData {
+        version: CmsVersion::V0,
+        recip_infos,
+        encrypted_content,
+    };
+
     let ci = ContentInfo {
         content_type: oids::ID_ENVELOPED_DATA,
-        content: Any::encode_from(enveloped).map_err(der_err)?,
+        content: Any::encode_from(&enveloped).map_err(der_err)?,
     };
     ci.to_der().map_err(der_err)
 }
@@ -185,15 +267,4 @@ fn decrypt_symmetric(
             "unsupported content encryption algorithm {other}"
         ))),
     }
-}
-
-fn issuer_and_serial(cert: &Certificate) -> IssuerAndSerialNumber {
-    IssuerAndSerialNumber {
-        issuer: cert.tbs_certificate.issuer.clone(),
-        serial_number: cert.tbs_certificate.serial_number.clone(),
-    }
-}
-
-fn builder_err(e: cms::builder::Error) -> AppError {
-    AppError::crypto(format!("CMS builder error: {e}"))
 }

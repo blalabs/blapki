@@ -14,6 +14,8 @@ pub mod scep;
 #[cfg(test)]
 mod http_test;
 #[cfg(test)]
+mod interop_test;
+#[cfg(test)]
 mod keystore_test;
 #[cfg(test)]
 mod ocsp_test;

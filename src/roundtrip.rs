@@ -47,8 +47,7 @@ fn scep_enrolment_roundtrip() {
 
     // --- Device: build a signed + enveloped PKCSReq. ---
     let sender_nonce = nonce::generate();
-    let enveloped_csr = envelope::build(&csr_der, &ca.cert).unwrap();
-    let enveloped_csr_der = envelope::to_content_info_der(&enveloped_csr).unwrap();
+    let enveloped_csr_der = envelope::build(&csr_der, &ca.cert).unwrap();
 
     let request_attrs = vec![
         attr::printable_attribute(attr::ID_MESSAGE_TYPE, MessageType::PkcsReq.as_value()).unwrap(),
@@ -104,8 +103,7 @@ fn scep_enrolment_roundtrip() {
 
     // --- Server: build a signed + enveloped CertRep for the device. ---
     let certs_only = degenerate::certs_only(&issued).unwrap();
-    let reply_env = envelope::build(&certs_only, &device.cert).unwrap();
-    let reply_env_der = envelope::to_content_info_der(&reply_env).unwrap();
+    let reply_env_der = envelope::build(&certs_only, &device.cert).unwrap();
 
     let reply_attrs = vec![
         attr::printable_attribute(attr::ID_MESSAGE_TYPE, MessageType::CertRep.as_value()).unwrap(),
