@@ -44,7 +44,7 @@ tower-http = { version = "0.6", features = ["trace", "limit"] }
 bytes = "1"
 
 # --- DB: runtime backend switch via DATABASE_URL ---
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls",
     "any",
