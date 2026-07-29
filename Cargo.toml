@@ -11,7 +11,7 @@ authors = ["BlaLabs"]
 [dependencies]
 # --- CMS / PKI core: keep the whole der-0.7 generation aligned ---
 cms = { version = "0.2.3", features = ["builder"] }
-x509-cert = { version = "0.2.5", features = ["builder", "hazmat", "pem"] }
+x509-cert = { version = "0.3.0", features = ["builder", "hazmat", "pem"] }
 x509-ocsp = { version = "0.2", features = ["builder", "std"] }
 der = { version = "0.7", features = ["oid", "alloc", "pem"] }
 spki = "0.7"
