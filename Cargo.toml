@@ -1,0 +1,69 @@
+[package]
+name = "blapki"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "A small SCEP PKI server for issuing certificates to Intune-managed devices"
+repository = "https://github.com/blalabs/blapki"
+authors = ["BlaLabs"]
+
+[dependencies]
+# --- CMS / PKI core: keep the whole der-0.7 generation aligned ---
+cms = { version = "0.2.3", features = ["builder"] }
+x509-cert = { version = "0.2.5", features = ["builder", "hazmat", "pem"] }
+x509-ocsp = { version = "0.2", features = ["builder", "std"] }
+der = { version = "0.7", features = ["oid", "alloc", "pem"] }
+spki = "0.7"
+const-oid = { version = "0.9", features = ["db"] }
+pkcs8 = { version = "0.10", features = ["pem", "pkcs5", "encryption"] }
+pkcs5 = "0.7"
+pkcs12 = "0.1"
+rsa = { version = "0.9.6", features = ["sha2"] }
+aes = "0.8"
+cbc = "0.1"
+des = "0.8"
+cipher = { version = "0.4", features = ["alloc", "block-padding"] }
+sha2 = { version = "0.10", features = ["oid"] }
+sha1 = { version = "0.10", features = ["oid"] }
+signature = "2"
+flagset = "0.4"
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+
+# --- Web ---
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+bytes = "1"
+
+# --- DB: runtime backend switch via DATABASE_URL ---
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "any",
+    "sqlite",
+    "postgres",
+    "mysql",
+    "migrate",
+    "time",
+] }
+
+# --- Intune cloud validation (rustls, not openssl -> musl-friendly) ---
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- Config / errors / logging ---
+figment = { version = "0.10", features = ["toml", "env"] }
+dotenvy = "0.15"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+hex-literal = "0.4"

@@ -1,0 +1,71 @@
+# blapki example configuration.
+#
+# Secrets are never stored here directly. Fields ending in `_env` name an
+# environment variable that holds the secret. Any value can also be overridden
+# with a BLAPKI_-prefixed env var (e.g. BLAPKI_SERVER__LISTEN).
+
+[server]
+listen = "0.0.0.0:8080"
+# SQLite by default. Include ?mode=rwc so the file is created if missing.
+# Switch backends by URL: postgres://user:pass@host/db  or  mysql://user:pass@host/db
+database_url = "sqlite://blapki.db?mode=rwc"
+# Externally reachable base URL, used for the AIA (OCSP) and CDP (CRL) URLs
+# embedded in issued certificates.
+base_url = "http://localhost:8080"
+
+[[ca]]
+id = "default"
+# The CA material can come from a file or from inline PEM. Provide one.
+#
+# Option A: a PEM bundle file with a CERTIFICATE and a private key block. If the
+# file does not exist, a self-signed CA is generated and written here on first
+# start (for development).
+key_file = "ca/default.pem"
+#
+# Option B: inline PEM. Paste the plain PEM directly (use TOML triple-quoted
+# strings for the multi-line value). A base64 blob of PEM/DER is also accepted.
+# Prefer the *_env variants so the private key is not stored in this file
+# (e.g. inject via a Kubernetes/Docker secret). Provide both cert and key.
+#   cert_pem = """
+#   -----BEGIN CERTIFICATE-----
+#   MIID...
+#   -----END CERTIFICATE-----
+#   """
+#   key_pem = """
+#   -----BEGIN PRIVATE KEY-----
+#   MIIE...
+#   -----END PRIVATE KEY-----
+#   """
+#   cert_pem_env = "BLAPKI_CA_DEFAULT_CERT"   # or read them from env vars
+#   key_pem_env  = "BLAPKI_CA_DEFAULT_KEY"
+#
+# key_password_env = "BLAPKI_CA_DEFAULT_PASSWORD"   # for an encrypted PKCS#8 key
+crl_lifetime_hours = 24
+
+# A profile for Microsoft Intune. The SCEP profile URL in Intune points at
+# https://<host>/scep/intune  (Intune appends /pkiclient.exe automatically).
+[[profile]]
+name = "intune"
+ca = "default"
+challenge = "intune"
+validity_days = 365
+key_usage = ["digitalSignature", "keyEncipherment"]
+extended_key_usage = ["clientAuth"]
+
+# A profile using a static shared secret, for local testing with sscep.
+[[profile]]
+name = "test"
+ca = "default"
+challenge = "static"
+static_secret_env = "BLAPKI_TEST_CHALLENGE"
+validity_days = 90
+key_usage = ["digitalSignature", "keyEncipherment"]
+extended_key_usage = ["clientAuth"]
+
+# Required only when a profile uses challenge = "intune".
+[intune]
+tenant_id = "00000000-0000-0000-0000-000000000000"
+client_id = "00000000-0000-0000-0000-000000000000"
+client_secret_env = "BLAPKI_INTUNE_CLIENT_SECRET"
+# login_host = "https://login.microsoftonline.com"
+# resource = "https://api.manage.microsoft.com/"
