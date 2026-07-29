@@ -159,7 +159,7 @@ dependencies = [
  "base64",
  "bytes",
  "cbc 0.2.1",
- "cipher 0.4.4",
+ "cipher 0.5.2",
  "cms",
  "const-oid 0.9.6",
  "der 0.7.10",
