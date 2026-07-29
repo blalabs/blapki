@@ -66,4 +66,4 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 async-trait = "0.1"
 
 [dev-dependencies]
-hex-literal = "0.4"
+hex-literal = "1.1"
