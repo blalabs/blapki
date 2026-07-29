@@ -162,7 +162,7 @@ dependencies = [
  "cipher 0.4.4",
  "cms",
  "const-oid 0.9.6",
- "der 0.7.10",
+ "der 0.8.1",
  "des",
  "dotenvy",
  "figment",
