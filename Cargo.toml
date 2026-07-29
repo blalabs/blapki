@@ -17,7 +17,7 @@ der = { version = "0.7", features = ["oid", "alloc", "pem"] }
 spki = "0.7"
 const-oid = { version = "0.9", features = ["db"] }
 pkcs8 = { version = "0.10", features = ["pem", "pkcs5", "encryption"] }
-pkcs5 = "0.7"
+pkcs5 = "0.8"
 pkcs12 = "0.1"
 rsa = { version = "0.9.6", features = ["sha2"] }
 aes = "0.8"
