@@ -12,6 +12,39 @@ updates:
           - patch
     commit-message:
       prefix: "chore"
+    # The der-0.7 / RustCrypto generation is pinned to what cms 0.2.3 and
+    # x509-cert 0.2.5 require; they cannot move until cms ships a der-0.8
+    # release, and then only as one coordinated upgrade. Block the breaking
+    # (0.x-minor / major) bumps of that generation; patch updates still flow.
+    ignore:
+      - dependency-name: "cms"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "x509-*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "der"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "spki"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "const-oid"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "pkcs*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "sha*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "aes"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "cbc"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "des"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "cipher"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "rsa"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "signature"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "rand"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
