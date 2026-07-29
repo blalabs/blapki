@@ -35,7 +35,7 @@ hex = "0.4"
 # --- Web ---
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-tower-http = { version = "0.6", features = ["trace", "limit"] }
+tower-http = { version = "0.7", features = ["trace", "limit"] }
 bytes = "1"
 
 # --- DB: runtime backend switch via DATABASE_URL ---
