@@ -167,7 +167,7 @@ dependencies = [
  "cbc",
  "cipher",
  "cms",
- "const-oid 0.9.6",
+ "const-oid 0.10.2",
  "der",
  "des",
  "dotenvy",
