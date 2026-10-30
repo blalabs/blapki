@@ -6,6 +6,13 @@
 //! key (CEK) from the matching
 //! `KeyTransRecipientInfo`, read the CBC IV from the algorithm parameters, then
 //! symmetric-decrypt the content.
+//!
+//! The CEK unwrap uses RSA PKCS#1 v1.5, which is open to Bleichenbacher's
+//! padding-oracle attack if a caller can tell a padding failure apart from
+//! any later failure. `open` therefore uses implicit rejection: a CEK that
+//! fails to unwrap (or has the wrong length) is silently replaced by a
+//! deterministic secret-derived key, and decryption carries on as normal.
+//! Callers must still map every `open` error to one uniform response.
 
 use cipher::block_padding::Pkcs7;
 use cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
@@ -16,10 +23,14 @@ use cms::enveloped_data::{
 use const_oid::ObjectIdentifier;
 use der::asn1::{Any, Null, OctetString, SetOfVec};
 use der::{Decode, Encode, Sequence, Tag};
+use hmac::{Hmac, Mac};
 use rand::RngCore;
+use rsa::traits::PrivateKeyParts;
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use sha2::{Digest, Sha256};
 use spki::AlgorithmIdentifierOwned;
 use x509_cert::certificate::Raw;
+use x509_cert::ext::pkix::SubjectKeyIdentifier;
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::Certificate;
@@ -47,16 +58,18 @@ pub fn open(
     ca_cert: &Certificate,
     ca_key: &RsaPrivateKey,
 ) -> AppResult<Vec<u8>> {
-    let cek = recover_cek(enveloped, ca_cert, ca_key)?;
-
+    // Every check that depends only on public data runs before the RSA step.
     let eci = &enveloped.encrypted_content;
+    let key_len = content_key_len(eci.content_enc_alg.oid)?;
     let ciphertext = eci
         .encrypted_content
         .as_ref()
         .ok_or_else(|| AppError::crypto("enveloped data has no encrypted content"))?
         .as_bytes();
     let iv = read_iv(&eci.content_enc_alg.parameters)?;
+    let ktri = select_recipient(enveloped, ca_cert)?;
 
+    let cek = unwrap_cek(ca_key, ktri.enc_key.as_bytes(), key_len);
     decrypt_symmetric(eci.content_enc_alg.oid, &cek, &iv, ciphertext)
 }
 
@@ -177,36 +190,65 @@ pub fn parse(der: &[u8]) -> AppResult<EnvelopedData> {
     EnvelopedData::from_der(der).map_err(|e| AppError::crypto(format!("not an EnvelopedData: {e}")))
 }
 
-fn recover_cek(
-    enveloped: &EnvelopedData,
+/// Pick the key-transport recipient to unwrap, using only the public recipient
+/// identifiers. The choice must never depend on whether an unwrap succeeds:
+/// "try each recipient until one decrypts" lets an attacker pair a probe
+/// ciphertext with a known-good one and read the padding result from which
+/// key ended up being used.
+fn select_recipient<'a>(
+    enveloped: &'a EnvelopedData,
     ca_cert: &Certificate,
-    ca_key: &RsaPrivateKey,
-) -> AppResult<Vec<u8>> {
-    // Prefer the recipient that names our CA cert.
-    for ri in enveloped.recip_infos.0.iter() {
-        if let RecipientInfo::Ktri(ktri) = ri {
-            if ktri_matches(ktri, ca_cert) {
-                return rsa_unwrap(ca_key, ktri.enc_key.as_bytes());
-            }
-        }
+) -> AppResult<&'a KeyTransRecipientInfo> {
+    let ktris: Vec<&KeyTransRecipientInfo> = enveloped
+        .recip_infos
+        .0
+        .iter()
+        .filter_map(|ri| match ri {
+            RecipientInfo::Ktri(ktri) => Some(ktri),
+            _ => None,
+        })
+        .collect();
+    if let Some(ktri) = ktris.iter().find(|ktri| ktri_matches(ktri, ca_cert)) {
+        return Ok(ktri);
     }
-    // Fall back to trying every key-transport recipient.
-    for ri in enveloped.recip_infos.0.iter() {
-        if let RecipientInfo::Ktri(ktri) = ri {
-            if let Ok(cek) = rsa_unwrap(ca_key, ktri.enc_key.as_bytes()) {
-                return Ok(cek);
-            }
-        }
+    // Be lenient with a lone recipient whose identifier we do not recognise.
+    match ktris.as_slice() {
+        [only] => Ok(only),
+        _ => Err(AppError::crypto(
+            "no key-transport recipient names the CA certificate",
+        )),
     }
-    Err(AppError::crypto(
-        "no recipient in the enveloped data could be decrypted with the CA key",
-    ))
 }
 
-fn rsa_unwrap(ca_key: &RsaPrivateKey, encrypted_key: &[u8]) -> AppResult<Vec<u8>> {
-    ca_key
-        .decrypt(Pkcs1v15Encrypt, encrypted_key)
-        .map_err(|e| AppError::crypto(format!("RSA key unwrap failed: {e}")))
+/// RSA-unwrap the CEK with implicit rejection: if the PKCS#1 v1.5 padding is
+/// invalid or the key has the wrong length for the content cipher, return a
+/// synthetic key instead of an error. The bad CEK then fails later, at the
+/// symmetric unpad or CSR parse, exactly like a well-padded but wrong one.
+///
+/// This removes the explicit oracle. The `rsa` crate's decryption is not
+/// constant time (RUSTSEC-2023-0071, "Marvin"), so a timing side channel
+/// remains; a separate RA decryption key is the fix for that.
+fn unwrap_cek(ca_key: &RsaPrivateKey, encrypted_key: &[u8], key_len: usize) -> Vec<u8> {
+    // Derive the fallback up front so both outcomes do the same work.
+    let synthetic = synthetic_cek(ca_key, encrypted_key, key_len);
+    match ca_key.decrypt_blinded(&mut rand::thread_rng(), Pkcs1v15Encrypt, encrypted_key) {
+        Ok(cek) if cek.len() == key_len => cek,
+        _ => synthetic,
+    }
+}
+
+/// A CEK derived from the encrypted key with HMAC-SHA256, keyed by a hash of
+/// the CA's private exponent. It is unpredictable to an attacker but stable
+/// for a given ciphertext, so resending the same probe changes nothing.
+fn synthetic_cek(ca_key: &RsaPrivateKey, encrypted_key: &[u8], key_len: usize) -> Vec<u8> {
+    let kdk = Sha256::new()
+        .chain_update(b"blapki implicit rejection")
+        .chain_update(ca_key.d().to_bytes_be())
+        .finalize();
+    let mut mac = Hmac::<Sha256>::new_from_slice(&kdk).expect("HMAC accepts any key length");
+    mac.update(encrypted_key);
+    // key_len is at most 32 (AES-256), the HMAC-SHA256 output size.
+    mac.finalize().into_bytes()[..key_len].to_vec()
 }
 
 fn ktri_matches(ktri: &KeyTransRecipientInfo, ca_cert: &Certificate) -> bool {
@@ -215,10 +257,29 @@ fn ktri_matches(ktri: &KeyTransRecipientInfo, ca_cert: &Certificate) -> bool {
             ias.issuer == ca_cert.tbs_certificate.issuer
                 && ias.serial_number == ca_cert.tbs_certificate.serial_number
         }
-        // SKI matching is not needed for the issuer+serial recipients Intune/
-        // Windows emit; the fallback loop covers the SKI case.
-        RecipientIdentifier::SubjectKeyIdentifier(_) => false,
+        RecipientIdentifier::SubjectKeyIdentifier(ski) => ca_cert
+            .tbs_certificate
+            .get::<SubjectKeyIdentifier>()
+            .ok()
+            .flatten()
+            .is_some_and(|(_, ca_ski)| ca_ski.0.as_bytes() == ski.0.as_bytes()),
     }
+}
+
+/// Key length in bytes of a supported content-encryption algorithm.
+fn content_key_len(alg: ObjectIdentifier) -> AppResult<usize> {
+    Ok(match alg {
+        oids::ID_AES_128_CBC => 16,
+        oids::ID_AES_192_CBC => 24,
+        oids::ID_AES_256_CBC => 32,
+        oids::ID_DES_EDE3_CBC => 24,
+        oids::ID_DES_CBC => 8,
+        other => {
+            return Err(AppError::crypto(format!(
+                "unsupported content encryption algorithm {other}"
+            )))
+        }
+    })
 }
 
 fn read_iv(parameters: &Option<Any>) -> AppResult<Vec<u8>> {

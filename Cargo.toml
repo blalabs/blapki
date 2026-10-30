@@ -31,6 +31,7 @@ des = "0.8"
 cipher = { version = "0.4", features = ["alloc", "block-padding"] }
 sha2 = { version = "0.10", features = ["oid"] }
 sha1 = { version = "0.10", features = ["oid"] }
+hmac = "0.12"
 signature = "2"
 flagset = "0.4"
 rand = "0.8"
