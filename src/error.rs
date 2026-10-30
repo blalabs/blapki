@@ -69,3 +69,20 @@ impl IntoResponse for AppError {
 }
 
 pub type AppResult<T> = std::result::Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn server_error_body_hides_detail() {
+        let resp = AppError::crypto("RSA padding check failed").into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!body.contains("padding"), "body leaks detail: {body}");
+        assert_eq!(body, "Internal Server Error");
+    }
+}

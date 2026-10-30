@@ -8,15 +8,19 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Bytes};
 use axum::extract::{Path, Query, State};
-use cms::content_info::ContentInfo;
-use cms::enveloped_data::{EnvelopedData, KeyTransRecipientInfo, RecipientInfo, RecipientInfos};
+use cms::content_info::{CmsVersion, ContentInfo};
+use cms::enveloped_data::{
+    EnvelopedData, KeyTransRecipientInfo, RecipientIdentifier, RecipientInfo, RecipientInfos,
+};
 use cms::signed_data::SignedData;
 use der::asn1::{Any, OctetString, SetOfVec};
 use der::{Decode, Encode};
 use rsa::Pkcs1v15Encrypt;
 use sqlx::Row;
+use x509_cert::attr::Attribute;
 use x509_cert::builder::{Builder, RequestBuilder};
 use x509_cert::ext::pkix::name::DirectoryString;
+use x509_cert::ext::pkix::SubjectKeyIdentifier;
 use x509_cert::name::Name;
 use x509_cert::request::attributes::ChallengePassword;
 
@@ -248,21 +252,33 @@ fn with_enc_key(ktri: &KeyTransRecipientInfo, enc_key: Vec<u8>) -> KeyTransRecip
     ktri
 }
 
-fn sign_pkcsreq(device: &CertificateAuthority, env_der: &[u8], txn: &str) -> Vec<u8> {
+/// Sign a PKCSReq around `env_der`. Returns the request and its sender nonce.
+fn sign_pkcsreq(device: &CertificateAuthority, env_der: &[u8], txn: &str) -> (Vec<u8>, Vec<u8>) {
+    let sender_nonce = nonce::generate();
     let attrs = vec![
         attr::printable_attribute(attr::ID_MESSAGE_TYPE, MessageType::PkcsReq.as_value()).unwrap(),
         attr::printable_attribute(attr::ID_TRANSACTION_ID, txn).unwrap(),
-        attr::octet_attribute(attr::ID_SENDER_NONCE, &nonce::generate()).unwrap(),
+        attr::octet_attribute(attr::ID_SENDER_NONCE, &sender_nonce).unwrap(),
     ];
-    sign::build_cert_rep(&device.signing_key, &device.cert, Some(env_der), attrs).unwrap()
+    let request =
+        sign::build_cert_rep(&device.signing_key, &device.cert, Some(env_der), attrs).unwrap();
+    (request, sender_nonce)
+}
+
+fn reply_attrs(reply_der: &[u8]) -> SetOfVec<Attribute> {
+    let ci = ContentInfo::from_der(reply_der).unwrap();
+    let sd: SignedData = ci.content.decode_as().unwrap();
+    let signer = sd.signer_infos.0.iter().next().unwrap();
+    signer.signed_attrs.clone().unwrap()
 }
 
 /// The failInfo of a CertRep, or `None` when it carries none.
 fn fail_info(reply_der: &[u8]) -> Option<String> {
-    let ci = ContentInfo::from_der(reply_der).unwrap();
-    let sd: SignedData = ci.content.decode_as().unwrap();
-    let signer = sd.signer_infos.0.iter().next().unwrap();
-    attr::read_string(signer.signed_attrs.as_ref().unwrap(), attr::ID_FAIL_INFO).ok()
+    attr::read_string(&reply_attrs(reply_der), attr::ID_FAIL_INFO).ok()
+}
+
+fn recipient_nonce(reply_der: &[u8]) -> Vec<u8> {
+    attr::read_octets(&reply_attrs(reply_der), attr::ID_RECIPIENT_NONCE).unwrap()
 }
 
 async fn issued_count(state: &Shared) -> i64 {
@@ -303,7 +319,8 @@ async fn rsa_unwrap_failures_are_indistinguishable() {
 
     for (case, enc_key) in probes {
         let env_der = rebuild_envelope(ed.clone(), vec![with_enc_key(&ktri, enc_key)]);
-        let (status, body) = post(&state, sign_pkcsreq(&device, &env_der, "txn-oracle")).await;
+        let (request, sender_nonce) = sign_pkcsreq(&device, &env_der, "txn-oracle");
+        let (status, body) = post(&state, request).await;
         assert_eq!(status, 200, "{case}: must fail in band");
         let reply = verify::parse_and_verify(&body).unwrap();
         assert_eq!(reply.message_type, MessageType::CertRep, "{case}");
@@ -313,6 +330,7 @@ async fn rsa_unwrap_failures_are_indistinguishable() {
             Some(FailInfo::BadMessageCheck.as_value()),
             "{case}: failInfo must be badMessageCheck"
         );
+        assert_eq!(recipient_nonce(&body), sender_nonce, "{case}: nonce echoed");
     }
     assert_eq!(issued_count(&state).await, 0);
 }
@@ -345,12 +363,14 @@ async fn unwrap_result_cannot_steer_recipient_choice() {
     let probe = with_enc_key(&good, probe_key);
     let env_der = rebuild_envelope(ed, vec![probe, good]);
 
-    let (status, body) = post(&state, sign_pkcsreq(&device, &env_der, "txn-two")).await;
+    let (request, sender_nonce) = sign_pkcsreq(&device, &env_der, "txn-two");
+    let (status, body) = post(&state, request).await;
     assert_eq!(status, 200);
     assert_eq!(
         fail_info(&body).as_deref(),
         Some(FailInfo::BadMessageCheck.as_value())
     );
+    assert_eq!(recipient_nonce(&body), sender_nonce);
     assert_eq!(issued_count(&state).await, 0);
 }
 
@@ -373,7 +393,63 @@ async fn lone_unrecognised_recipient_still_enrols() {
     )
     .unwrap();
 
-    let (status, body) = post(&state, sign_pkcsreq(&device, &env_der, "txn-lone")).await;
+    let (status, body) = post(&state, sign_pkcsreq(&device, &env_der, "txn-lone").0).await;
+    assert_eq!(status, 200);
+    assert!(fail_info(&body).is_none(), "expected a SUCCESS CertRep");
+    assert_eq!(issued_count(&state).await, 1);
+}
+
+#[tokio::test]
+async fn recipient_named_by_ca_ski_is_selected() {
+    let (state, ca) = test_state("blapki_http_ski_recip.db").await;
+    let device = CertificateAuthority::generate_self_signed("dev", "dev", 2048).unwrap();
+    let csr = build_csr(&device, "CN=device-ski-recip", SECRET);
+
+    let (_, ca_ski) = ca
+        .cert
+        .tbs_certificate
+        .get::<SubjectKeyIdentifier>()
+        .unwrap()
+        .expect("CA certificate must carry a SubjectKeyIdentifier");
+
+    // The good CEK is addressed to the CA by SKI. Next to it sits an unrelated
+    // recipient holding garbage. With two recipients the lone-recipient
+    // fallback is off, so enrolment only works if the SKI branch matches.
+    let env = envelope::build(&csr, &ca.cert).unwrap();
+    let (ed, good) = split_envelope(&env);
+    let mut by_ski = good.clone();
+    by_ski.version = CmsVersion::V2;
+    by_ski.rid = RecipientIdentifier::SubjectKeyIdentifier(ca_ski);
+    let mut unrelated = with_enc_key(&good, vec![0x42u8; 256]);
+    if let RecipientIdentifier::IssuerAndSerialNumber(ias) = &mut unrelated.rid {
+        ias.issuer = Name::from_str("CN=someone else").unwrap();
+    }
+    let env_der = rebuild_envelope(ed, vec![unrelated, by_ski]);
+
+    let (status, body) = post(&state, sign_pkcsreq(&device, &env_der, "txn-ski").0).await;
+    assert_eq!(status, 200);
+    assert!(fail_info(&body).is_none(), "expected a SUCCESS CertRep");
+    assert_eq!(issued_count(&state).await, 1);
+}
+
+#[tokio::test]
+async fn recipient_named_by_ca_issuer_and_serial_is_selected() {
+    let (state, ca) = test_state("blapki_http_ias_recip.db").await;
+    let device = CertificateAuthority::generate_self_signed("dev", "dev", 2048).unwrap();
+    let csr = build_csr(&device, "CN=device-ias-recip", SECRET);
+
+    // The good CEK is addressed to the CA by issuer and serial, next to an
+    // unrelated recipient holding garbage. Two recipients turn off the
+    // lone-recipient fallback, so only the issuer/serial match can enrol.
+    let env = envelope::build(&csr, &ca.cert).unwrap();
+    let (ed, good) = split_envelope(&env);
+    let mut unrelated = with_enc_key(&good, vec![0x42u8; 256]);
+    if let RecipientIdentifier::IssuerAndSerialNumber(ias) = &mut unrelated.rid {
+        ias.issuer = Name::from_str("CN=someone else").unwrap();
+    }
+    let env_der = rebuild_envelope(ed, vec![unrelated, good]);
+
+    let (status, body) = post(&state, sign_pkcsreq(&device, &env_der, "txn-ias").0).await;
     assert_eq!(status, 200);
     assert!(fail_info(&body).is_none(), "expected a SUCCESS CertRep");
     assert_eq!(issued_count(&state).await, 1);
