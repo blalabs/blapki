@@ -112,17 +112,26 @@ async fn pki_operation(state: &Shared, profile: &str, body: &[u8]) -> AppResult<
         }
     }
 
-    // Decrypt the enveloped CSR.
+    // Decrypt the enveloped CSR. Every failure between here and a parsed CSR
+    // gets the same in-band badMessageCheck reply with no detail: telling
+    // them apart would give callers an RSA padding oracle on the CA key.
     let enveloped = parsed
         .enveloped
         .as_ref()
         .ok_or_else(|| AppError::bad_request("enrolment request carries no envelope"))?;
-    let csr_der = envelope::open(enveloped, &ca.cert, &ca.private_key)?;
-    let parsed_csr = csr::parse(&csr_der)?;
+    let opened = envelope::open(enveloped, &ca.cert, &ca.private_key)
+        .and_then(|csr_der| csr::parse(&csr_der));
+    let parsed_csr = match opened {
+        Ok(parsed_csr) => parsed_csr,
+        Err(e) => {
+            tracing::warn!(profile, txn = %parsed.transaction_id, error = %e, "cannot open enrolment request");
+            return build_failure(ca, &parsed, FailInfo::BadMessageCheck);
+        }
+    };
 
     let input = ValidationInput {
         transaction_id: &parsed.transaction_id,
-        csr_der: &csr_der,
+        csr_der: &parsed_csr.der,
         challenge_password: parsed_csr.challenge_password.as_deref(),
     };
 

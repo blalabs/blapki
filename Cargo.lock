@@ -175,6 +175,7 @@ dependencies = [
  "flagset",
  "hex",
  "hex-literal",
+ "hmac",
  "pkcs12",
  "pkcs5",
  "pkcs8",
