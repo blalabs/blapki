@@ -2,7 +2,7 @@
 //!
 //! Uses sqlx's runtime `Any` driver so the backend is chosen at startup from
 //! the `database_url` (SQLite by default, Postgres or MySQL by URL). To stay
-//! portable across all three, the schema uses only `VARCHAR`/`TEXT`/`INTEGER`:
+//! portable across all three, the schema uses only `VARCHAR`/`TEXT`/`BIGINT`:
 //! certificate DER is stored base64-encoded and timestamps as RFC 3339 strings.
 //! The database holds only issued-certificate, transaction and revocation
 //! state; CAs and profiles come from config.
@@ -29,7 +29,7 @@ const SCHEMA: &[&str] = &[
         status VARCHAR(16) NOT NULL,
         created_at VARCHAR(40) NOT NULL,
         revoked_at VARCHAR(40),
-        revocation_reason INTEGER
+        revocation_reason BIGINT
     )",
     "CREATE TABLE IF NOT EXISTS scep_transaction (
         transaction_id VARCHAR(128) PRIMARY KEY,

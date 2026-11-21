@@ -1,8 +1,44 @@
 //! Repository functions over the issued-certificate and transaction tables.
 
+use std::borrow::Cow;
+
 use sqlx::{AnyPool, Row};
 
 use crate::error::AppResult;
+
+/// Adapt a query written with `?` placeholders to the connected backend.
+///
+/// The sqlx `Any` driver hands SQL to the backend untouched. SQLite and MySQL
+/// take `?`, but Postgres only understands numbered `$1` placeholders.
+fn sql<'a>(pool: &AnyPool, query: &'a str) -> Cow<'a, str> {
+    if pool
+        .connect_options()
+        .database_url
+        .scheme()
+        .starts_with("postgres")
+    {
+        Cow::Owned(numbered_placeholders(query))
+    } else {
+        Cow::Borrowed(query)
+    }
+}
+
+/// Rewrite each `?` as `$1`, `$2`, ... None of the queries in this module
+/// contain a literal question mark.
+fn numbered_placeholders(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 8);
+    let mut n = 0;
+    for c in query.chars() {
+        if c == '?' {
+            n += 1;
+            out.push('$');
+            out.push_str(&n.to_string());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 /// Certificate status values.
 pub const STATUS_VALID: &str = "valid";
@@ -32,12 +68,13 @@ pub struct IssuedCertificate {
 
 /// Insert a newly issued certificate.
 pub async fn insert_issued(pool: &AnyPool, cert: &IssuedCertificate) -> AppResult<()> {
-    sqlx::query(
+    sqlx::query(&sql(
+        pool,
         "INSERT INTO issued_certificate
          (serial, ca_id, subject, not_before, not_after, der_b64, thumbprint_sha1,
           transaction_id, profile, status, created_at, revoked_at, revocation_reason)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
+    ))
     .bind(&cert.serial)
     .bind(&cert.ca_id)
     .bind(&cert.subject)
@@ -72,10 +109,11 @@ pub async fn status_by_serial(
     ca_id: &str,
     serial: &str,
 ) -> AppResult<RevocationStatus> {
-    let row = sqlx::query(
+    let row = sqlx::query(&sql(
+        pool,
         "SELECT status, revoked_at, revocation_reason
          FROM issued_certificate WHERE ca_id = ? AND serial = ?",
-    )
+    ))
     .bind(ca_id)
     .bind(serial)
     .fetch_optional(pool)
@@ -106,10 +144,11 @@ pub struct RevokedEntry {
 
 /// List all revoked certificates for a CA.
 pub async fn list_revoked(pool: &AnyPool, ca_id: &str) -> AppResult<Vec<RevokedEntry>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&sql(
+        pool,
         "SELECT serial, revoked_at, revocation_reason
          FROM issued_certificate WHERE ca_id = ? AND status = ?",
-    )
+    ))
     .bind(ca_id)
     .bind(STATUS_REVOKED)
     .fetch_all(pool)
@@ -133,11 +172,12 @@ pub async fn revoke(
     reason: i64,
     revoked_at: &str,
 ) -> AppResult<bool> {
-    let result = sqlx::query(
+    let result = sqlx::query(&sql(
+        pool,
         "UPDATE issued_certificate
          SET status = ?, revoked_at = ?, revocation_reason = ?
          WHERE ca_id = ? AND serial = ? AND status = ?",
-    )
+    ))
     .bind(STATUS_REVOKED)
     .bind(revoked_at)
     .bind(reason)
@@ -161,16 +201,19 @@ pub async fn record_transaction(
     // Upsert by transaction id. The id is chosen by the (unauthenticated)
     // client, so a later failed attempt must never overwrite the record of a
     // transaction that already produced a certificate.
-    let existing =
-        sqlx::query("SELECT transaction_id FROM scep_transaction WHERE transaction_id = ?")
-            .bind(transaction_id)
-            .fetch_optional(pool)
-            .await?;
+    let existing = sqlx::query(&sql(
+        pool,
+        "SELECT transaction_id FROM scep_transaction WHERE transaction_id = ?",
+    ))
+    .bind(transaction_id)
+    .fetch_optional(pool)
+    .await?;
     if existing.is_some() {
-        sqlx::query(
+        sqlx::query(&sql(
+            pool,
             "UPDATE scep_transaction SET status = ?, message_type = ?
              WHERE transaction_id = ? AND status <> ?",
-        )
+        ))
         .bind(status)
         .bind(message_type)
         .bind(transaction_id)
@@ -178,10 +221,8 @@ pub async fn record_transaction(
         .execute(pool)
         .await?;
     } else {
-        sqlx::query(
-            "INSERT INTO scep_transaction (transaction_id, profile, status, message_type, created_at)
-             VALUES (?, ?, ?, ?, ?)",
-        )
+        sqlx::query(&sql(pool, "INSERT INTO scep_transaction (transaction_id, profile, status, message_type, created_at)
+             VALUES (?, ?, ?, ?, ?)"))
         .bind(transaction_id)
         .bind(profile)
         .bind(status)
@@ -223,6 +264,15 @@ mod tests {
             revoked_at: None,
             revocation_reason: None,
         }
+    }
+
+    #[test]
+    fn placeholders_are_numbered_for_postgres() {
+        assert_eq!(
+            numbered_placeholders("SELECT a FROM t WHERE b = ? AND c <> ?"),
+            "SELECT a FROM t WHERE b = $1 AND c <> $2"
+        );
+        assert_eq!(numbered_placeholders("SELECT 1"), "SELECT 1");
     }
 
     #[tokio::test]
