@@ -97,7 +97,12 @@ impl ChallengeValidator for IntuneValidator {
 
     async fn on_failure(&self, input: &ValidationInput<'_>, message: &str) -> AppResult<()> {
         self.client
-            .failure_notification(input.transaction_id, input.csr_der, 1234, message)
+            .failure_notification(
+                input.transaction_id,
+                input.csr_der,
+                crate::intune::HRESULT_E_FAIL,
+                message,
+            )
             .await
     }
 }

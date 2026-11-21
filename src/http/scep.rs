@@ -140,8 +140,13 @@ async fn pki_operation(state: &Shared, profile: &str, body: &[u8]) -> AppResult<
 
     // Challenge validation (static secret / Intune / none).
     if let Err(e) = rt.validator.validate(&input).await {
+        // The validator could not be reached: that is not a verdict on the
+        // request. Answer 502 so the device retries, rather than telling it
+        // (permanently) that enrolment was denied.
+        if matches!(e, AppError::Upstream(_)) {
+            return Err(e);
+        }
         tracing::warn!(profile, txn = %parsed.transaction_id, error = %e, "challenge validation failed");
-        let _ = rt.validator.on_failure(&input, &e.to_string()).await;
         let _ = record(state, rt, &parsed, repo::STATUS_FAILED, "PKCSReq").await;
         return build_failure(ca, &parsed, FailInfo::BadRequest);
     }

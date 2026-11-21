@@ -30,6 +30,11 @@ const SCEP_SERVICE_VERSION: &str = "2018-02-20";
 const VALIDATION_SERVICE_NAME: &str = "ScepRequestValidationFEService";
 const CALLER_INFO: &str = "blapki";
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// HRESULT reported to Intune when issuance fails after validation (E_FAIL).
+pub const HRESULT_E_FAIL: i64 = 0x8000_4005_u32 as i32 as i64;
+
 const VALIDATE_PATH: &str = "ScepActions/validateRequest";
 const SUCCESS_PATH: &str = "ScepActions/successNotification";
 const FAILURE_PATH: &str = "ScepActions/failureNotification";
@@ -61,20 +66,33 @@ pub struct IntuneClient {
 
 impl IntuneClient {
     pub fn new(cfg: &IntuneConfig, client_secret: String) -> AppResult<Self> {
+        // Tokens and CSRs only ever travel over TLS, and a stalled Microsoft
+        // endpoint must not hang an enrolment forever.
+        let http = reqwest::Client::builder()
+            .https_only(true)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| AppError::Config(format!("cannot build Intune HTTP client: {e}")))?;
+        // The scope is "<resource>/.default"; tolerate a resource configured
+        // without its trailing slash.
+        let intune_resource = format!("{}/", cfg.resource.trim_end_matches('/'));
         Ok(Self {
-            http: reqwest::Client::new(),
+            http,
             tenant_id: cfg.tenant_id.clone(),
             client_id: cfg.client_id.clone(),
             client_secret,
             login_host: cfg.login_host.trim_end_matches('/').to_string(),
-            intune_resource: cfg.resource.clone(),
+            intune_resource,
             tokens: RwLock::new(HashMap::new()),
             validation_uri: RwLock::new(None),
         })
     }
 
     /// Validate a SCEP request against Intune. Returns `Ok` only if Intune
-    /// approves the challenge; any other outcome is an error.
+    /// approves the challenge. A request Intune rejects is `BadRequest`;
+    /// failing to get an answer at all is `Upstream`, so the caller can tell
+    /// "denied" from "try again later".
     pub async fn validate_request(&self, transaction_id: &str, csr_der: &[u8]) -> AppResult<()> {
         let uri = self.validation_endpoint(transaction_id).await?;
         let body = json!({
@@ -89,7 +107,7 @@ impl IntuneClient {
             .await?;
         match resp.code.as_deref() {
             Some("Success") => Ok(()),
-            Some(code) => Err(AppError::Upstream(format!(
+            Some(code) => Err(AppError::BadRequest(format!(
                 "Intune rejected the request: {code}{}",
                 resp.error_description
                     .map(|d| format!(" ({d})"))
@@ -187,6 +205,12 @@ impl IntuneClient {
                 AppError::Upstream(format!("Graph did not return a {VALIDATION_SERVICE_NAME}"))
             })?;
         let uri = uri.trim_end_matches('/').to_string();
+        // The Intune bearer token is sent to this address.
+        if !uri.starts_with("https://") {
+            return Err(AppError::Upstream(format!(
+                "Graph returned a non-HTTPS {VALIDATION_SERVICE_NAME} endpoint"
+            )));
+        }
         *self.validation_uri.write().await = Some(uri.clone());
         Ok(uri)
     }
@@ -210,13 +234,19 @@ impl IntuneClient {
             .json(body)
             .send()
             .await
-            .map_err(|e| AppError::Upstream(format!("Intune request failed: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(AppError::Upstream(format!(
-                "Intune returned HTTP {}",
-                resp.status()
-            )));
-        }
+            .map_err(|e| AppError::Upstream(format!("Intune request failed: {e}")));
+        let resp = match resp {
+            Ok(resp) if resp.status().is_success() => resp,
+            other => {
+                // The discovered endpoint can move; look it up again next time.
+                *self.validation_uri.write().await = None;
+                let resp = other?;
+                return Err(AppError::Upstream(format!(
+                    "Intune returned HTTP {}",
+                    resp.status()
+                )));
+            }
+        };
         resp.json::<T>()
             .await
             .map_err(|e| AppError::Upstream(format!("bad Intune response: {e}")))
@@ -245,7 +275,13 @@ impl IntuneClient {
             .map_err(|e| AppError::Upstream(format!("token request failed: {e}")))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect();
             return Err(AppError::Upstream(format!(
                 "AAD token request returned HTTP {status}: {text}"
             )));
