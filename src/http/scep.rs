@@ -282,7 +282,7 @@ fn issued_info(
         thumbprint_sha1: thumbprint(issued_der),
         serial_decimal: serial_decimal(issued),
         not_after_utc: time_to_utc(&issued.tbs_certificate.validity.not_after),
-        issuer_cn: common_name(&ca.cert.tbs_certificate.subject.to_string()),
+        issuer_cn: common_name(&ca.cert.tbs_certificate.subject),
     }
 }
 
@@ -333,13 +333,28 @@ fn time_to_utc(t: &x509_cert::time::Time) -> String {
     )
 }
 
-fn common_name(dn: &str) -> String {
-    // Extract the CN component from an RFC 4514 DN string.
-    for part in dn.split(',') {
-        let part = part.trim();
-        if let Some(cn) = part.strip_prefix("CN=") {
-            return cn.to_string();
+#[cfg(test)]
+pub(crate) fn issuer_common_name(ca: &CertificateAuthority) -> String {
+    common_name(&ca.cert.tbs_certificate.subject)
+}
+
+/// The common name of a DN, read from its attributes rather than by splitting
+/// the string form (which breaks on escaped commas). Falls back to the whole
+/// DN when there is no CN.
+fn common_name(name: &x509_cert::name::Name) -> String {
+    use der::asn1::{PrintableStringRef, Utf8StringRef};
+    for rdn in name.0.iter() {
+        for atv in rdn.0.iter() {
+            if atv.oid != const_oid::db::rfc4519::CN {
+                continue;
+            }
+            if let Ok(s) = atv.value.decode_as::<Utf8StringRef<'_>>() {
+                return s.as_str().to_owned();
+            }
+            if let Ok(s) = atv.value.decode_as::<PrintableStringRef<'_>>() {
+                return s.as_str().to_owned();
+            }
         }
     }
-    dn.to_string()
+    name.to_string()
 }

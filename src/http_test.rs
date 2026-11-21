@@ -549,3 +549,11 @@ async fn issued_certificate_is_backdated_and_within_ca_validity() {
     assert!(v.not_before.to_system_time() <= std::time::SystemTime::now());
     assert!(v.not_before.to_system_time() >= ca_v.not_before.to_system_time());
 }
+
+#[test]
+fn recipient_and_ca_names_survive_commas() {
+    // A CN containing a comma must not be cut short when reported to Intune.
+    let ca = CertificateAuthority::generate_self_signed("c", "Example\\, Inc. CA", 2048).unwrap();
+    let info = crate::http::scep::issuer_common_name(&ca);
+    assert_eq!(info, "Example, Inc. CA");
+}
