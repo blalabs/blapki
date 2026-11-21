@@ -8,6 +8,7 @@ pub mod scep;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::get;
 use axum::Router;
 use sqlx::AnyPool;
@@ -16,6 +17,9 @@ use tower_http::trace::TraceLayer;
 use crate::ca::CertificateAuthority;
 use crate::challenge::ChallengeValidator;
 use crate::error::{AppError, AppResult};
+
+/// Largest request body accepted.
+const MAX_BODY_BYTES: usize = 256 * 1024;
 
 /// Per-profile runtime state assembled from config.
 pub struct ProfileRuntime {
@@ -71,6 +75,8 @@ pub fn router(state: Shared) -> Router {
         // The base64 may contain '/', so the request takes the rest of the path.
         .route("/ocsp/{ca}/{*b64}", get(ocsp::ocsp_get))
         .route("/crl/{ca}", get(crl::crl))
+        // SCEP and OCSP messages are a few kilobytes at most.
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

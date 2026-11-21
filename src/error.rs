@@ -58,7 +58,13 @@ impl IntoResponse for AppError {
         // Log the full error. Only client errors echo their message back:
         // server-side detail (crypto, database, upstream) leaks internals and
         // can turn a failure mode into an oracle.
-        tracing::error!(error = %self, "request failed");
+        if status.is_server_error() {
+            tracing::error!(error = %self, "request failed");
+        } else {
+            // Malformed or unauthorised requests are routine on a public
+            // endpoint; they are not server errors.
+            tracing::warn!(error = %self, "request rejected");
+        }
         let body = if status.is_server_error() {
             status.canonical_reason().unwrap_or("error").to_string()
         } else {

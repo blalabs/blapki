@@ -88,7 +88,7 @@ openssl x509 -in device.crt -noout -subject -issuer -ext subjectAltName
 | POST | `/ocsp/{ca}` | OCSP request (DER body) |
 | GET | `/ocsp/{ca}/{base64}` | OCSP request (base64 in path) |
 | GET | `/crl/{ca}` | Current CRL (DER) |
-| GET | `/health` | Liveness, lists CAs and profiles |
+| GET | `/health` | Liveness / readiness (checks the database) |
 
 Windows and Intune append `/pkiclient.exe`; that path maps to the same handlers.
 

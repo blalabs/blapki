@@ -1,6 +1,7 @@
 //! SCEP endpoint: `GetCACaps`, `GetCACert`, and `PKIOperation`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -16,7 +17,7 @@ use crate::crypto::verify::ParsedRequest;
 use crate::crypto::{degenerate, envelope, sign, verify};
 use crate::db::repo::{self, IssuedCertificate};
 use crate::error::{AppError, AppResult};
-use crate::http::{now_utc, ProfileRuntime, Shared};
+use crate::http::{blocking, now_utc, ProfileRuntime, Shared};
 use crate::intune::IssuedInfo;
 use crate::scep::attributes::{FailInfo, MessageType};
 use crate::scep::protocol;
@@ -122,13 +123,20 @@ async fn pki_operation(state: &Shared, profile: &str, body: &[u8]) -> AppResult<
         .enveloped
         .as_ref()
         .ok_or_else(|| AppError::bad_request("enrolment request carries no envelope"))?;
-    let opened = envelope::open(enveloped, &ca.cert, &ca.private_key)
-        .and_then(|csr_der| csr::parse(&csr_der));
+    // RSA private-key work runs on the blocking pool, not the async workers.
+    let opened = {
+        let (ca, enveloped) = (ca.clone(), enveloped.clone());
+        blocking(move || {
+            envelope::open(&enveloped, &ca.cert, &ca.private_key)
+                .and_then(|csr_der| csr::parse(&csr_der))
+        })
+        .await
+    };
     let parsed_csr = match opened {
         Ok(parsed_csr) => parsed_csr,
         Err(e) => {
             tracing::warn!(profile, txn = %parsed.transaction_id, error = %e, "cannot open enrolment request");
-            return build_failure(ca, &parsed, FailInfo::BadMessageCheck);
+            return build_failure(ca, &parsed, FailInfo::BadMessageCheck).await;
         }
     };
 
@@ -148,7 +156,7 @@ async fn pki_operation(state: &Shared, profile: &str, body: &[u8]) -> AppResult<
         }
         tracing::warn!(profile, txn = %parsed.transaction_id, error = %e, "challenge validation failed");
         let _ = record(state, rt, &parsed, repo::STATUS_FAILED, "PKCSReq").await;
-        return build_failure(ca, &parsed, FailInfo::BadRequest);
+        return build_failure(ca, &parsed, FailInfo::BadRequest).await;
     }
 
     // Issue.
@@ -159,12 +167,16 @@ async fn pki_operation(state: &Shared, profile: &str, body: &[u8]) -> AppResult<
         ocsp_url: Some(state.ocsp_url(&rt.ca_id)),
         crl_url: Some(state.crl_url(&rt.ca_id)),
     };
-    let issued = match ca.issue(&parsed_csr.req, &opts) {
+    let issue_result = {
+        let (ca, req) = (ca.clone(), parsed_csr.req.clone());
+        blocking(move || ca.issue(&req, &opts)).await
+    };
+    let issued = match issue_result {
         Ok(cert) => cert,
         Err(e) => {
             tracing::error!(error = %e, "certificate issuance failed");
             let _ = rt.validator.on_failure(&input, &e.to_string()).await;
-            return build_failure(ca, &parsed, FailInfo::BadRequest);
+            return build_failure(ca, &parsed, FailInfo::BadRequest).await;
         }
     };
     let issued_der = issued
@@ -196,16 +208,19 @@ async fn pki_operation(state: &Shared, profile: &str, body: &[u8]) -> AppResult<
     };
     let reply_env_der = envelope::build_for(&certs_only, &recipient)?;
     let attrs = protocol::success_attrs(&parsed.transaction_id, &parsed.sender_nonce)?;
-    sign::build_cert_rep(&ca.signing_key, &ca.cert, Some(&reply_env_der), attrs)
+    let ca = ca.clone();
+    blocking(move || sign::build_cert_rep(&ca.signing_key, &ca.cert, Some(&reply_env_der), attrs))
+        .await
 }
 
-fn build_failure(
-    ca: &CertificateAuthority,
+async fn build_failure(
+    ca: &Arc<CertificateAuthority>,
     parsed: &ParsedRequest,
     fail: FailInfo,
 ) -> AppResult<Vec<u8>> {
     let attrs = protocol::failure_attrs(&parsed.transaction_id, &parsed.sender_nonce, fail)?;
-    sign::build_cert_rep(&ca.signing_key, &ca.cert, None, attrs)
+    let ca = ca.clone();
+    blocking(move || sign::build_cert_rep(&ca.signing_key, &ca.cert, None, attrs)).await
 }
 
 async fn persist(
