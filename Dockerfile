@@ -14,13 +14,16 @@ COPY . .
 RUN touch src/main.rs && cargo build --release && \
     strip target/release/blapki
 
-FROM alpine:3.20
+FROM alpine:3.22
 RUN apk add --no-cache ca-certificates && \
     addgroup -S blapki && adduser -S -G blapki blapki
-WORKDIR /app
 COPY --from=builder /src/target/release/blapki /usr/local/bin/blapki
-# Data directory for the SQLite DB and bootstrapped CA key (mount a volume here).
-RUN mkdir -p /data /app/ca && chown -R blapki:blapki /data /app
+# All state lives in /data: mount a volume here. It is the working directory,
+# so the relative paths in the example config (the SQLite database and the CA
+# key file) resolve inside the volume and survive the container.
+RUN mkdir -p /data /app && chown -R blapki:blapki /data && chmod 700 /data
+WORKDIR /data
+VOLUME /data
 USER blapki
 ENV BLAPKI_CONFIG=/app/config.toml
 EXPOSE 8080

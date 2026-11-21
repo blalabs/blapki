@@ -173,9 +173,15 @@ docker build -t blapki .
 docker run -p 8080:8080 -v "$PWD/data:/data" -v "$PWD/config.toml:/app/config.toml:ro" blapki
 ```
 
-The image runs as a non-root user. Mount a volume for the SQLite database and CA
-key material, or point `database_url` at Postgres/MySQL and provide the CA key
-via the configured path.
+The image runs as a non-root user with `/data` as its working directory, so the
+relative paths from the example config (`blapki.db`, `ca/default.pem`) land in
+the mounted volume. Keep that volume: it holds the CA private key and the record
+of every issued certificate. Alternatively point `database_url` at
+Postgres/MySQL and provide the CA through `cert_pem_env` / `key_pem_env`.
+
+blapki speaks plain HTTP. SCEP protects its own payloads, but put a TLS
+reverse proxy in front for the Intune-facing URL and never expose a profile with
+`challenge = "none"`.
 
 ## License
 

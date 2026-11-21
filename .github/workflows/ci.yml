@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -37,3 +40,18 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  audit:
+    name: dependency audit
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Accepted advisories are listed, with reasons, in .cargo/audit.toml.
+      - name: Audit dependencies
+        run: cargo audit
