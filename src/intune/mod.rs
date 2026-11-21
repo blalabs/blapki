@@ -60,8 +60,8 @@ pub struct IntuneClient {
 }
 
 impl IntuneClient {
-    pub fn new(cfg: &IntuneConfig, client_secret: String) -> Self {
-        Self {
+    pub fn new(cfg: &IntuneConfig, client_secret: String) -> AppResult<Self> {
+        Ok(Self {
             http: reqwest::Client::new(),
             tenant_id: cfg.tenant_id.clone(),
             client_id: cfg.client_id.clone(),
@@ -70,7 +70,7 @@ impl IntuneClient {
             intune_resource: cfg.resource.clone(),
             tokens: RwLock::new(HashMap::new()),
             validation_uri: RwLock::new(None),
-        }
+        })
     }
 
     /// Validate a SCEP request against Intune. Returns `Ok` only if Intune

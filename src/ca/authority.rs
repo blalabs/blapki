@@ -123,9 +123,12 @@ impl CertificateAuthority {
                 path_len_constraint: None,
             })
             .map_err(bld_err)?;
-        builder
-            .add_extension(&extensions::key_usage(&opts.key_usage)?)
-            .map_err(bld_err)?;
+        // A KeyUsage extension with no bits set is invalid (RFC 5280 4.2.1.3).
+        if !opts.key_usage.is_empty() {
+            builder
+                .add_extension(&extensions::key_usage(&opts.key_usage)?)
+                .map_err(bld_err)?;
+        }
         let eku = extensions::extended_key_usage(&opts.extended_key_usage)?;
         if !eku.0.is_empty() {
             builder.add_extension(&eku).map_err(bld_err)?;

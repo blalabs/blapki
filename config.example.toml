@@ -18,9 +18,13 @@ id = "default"
 # The CA material can come from a file or from inline PEM. Provide one.
 #
 # Option A: a PEM bundle file with a CERTIFICATE and a private key block. If the
-# file does not exist, a self-signed CA is generated and written here on first
-# start (for development).
+# file does not exist the server refuses to start, unless generate_if_missing
+# is set (see below).
 key_file = "ca/default.pem"
+# Create a new self-signed CA at key_file if it does not exist yet. Handy for a
+# first run; remove it (or set it to false) once the CA exists, so a wrong path
+# or a missing volume is an error instead of a silently replaced CA.
+generate_if_missing = true
 #
 # Option B: inline PEM. Paste the plain PEM directly (use TOML triple-quoted
 # strings for the multi-line value). A base64 blob of PEM/DER is also accepted.
@@ -42,15 +46,16 @@ key_file = "ca/default.pem"
 # key_password_env = "BLAPKI_CA_DEFAULT_PASSWORD"   # for an encrypted PKCS#8 key
 crl_lifetime_hours = 24
 
-# A profile for Microsoft Intune. The SCEP profile URL in Intune points at
-# https://<host>/scep/intune  (Intune appends /pkiclient.exe automatically).
-[[profile]]
-name = "intune"
-ca = "default"
-challenge = "intune"
-validity_days = 365
-key_usage = ["digitalSignature", "keyEncipherment"]
-extended_key_usage = ["clientAuth"]
+# A profile for Microsoft Intune (uncomment, together with [intune] below).
+# The SCEP profile URL in Intune points at https://<host>/scep/intune
+# (Intune appends /pkiclient.exe automatically).
+# [[profile]]
+# name = "intune"
+# ca = "default"
+# challenge = "intune"
+# validity_days = 365
+# key_usage = ["digitalSignature", "keyEncipherment"]
+# extended_key_usage = ["clientAuth"]
 
 # A profile using a static shared secret, for local testing with sscep.
 [[profile]]
@@ -62,10 +67,10 @@ validity_days = 90
 key_usage = ["digitalSignature", "keyEncipherment"]
 extended_key_usage = ["clientAuth"]
 
-# Required only when a profile uses challenge = "intune".
-[intune]
-tenant_id = "00000000-0000-0000-0000-000000000000"
-client_id = "00000000-0000-0000-0000-000000000000"
-client_secret_env = "BLAPKI_INTUNE_CLIENT_SECRET"
+# Required when a profile uses challenge = "intune".
+# [intune]
+# tenant_id = "00000000-0000-0000-0000-000000000000"
+# client_id = "00000000-0000-0000-0000-000000000000"
+# client_secret_env = "BLAPKI_INTUNE_CLIENT_SECRET"
 # login_host = "https://login.microsoftonline.com"
 # resource = "https://api.manage.microsoft.com/"

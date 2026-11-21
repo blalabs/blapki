@@ -28,9 +28,10 @@ cp .env.example .env         # set BLAPKI_TEST_CHALLENGE
 cargo run
 ```
 
-On first start, if a CA key file does not exist, a self-signed CA is generated
-and written to the configured path (a convenience for development; provide your
-own CA key in production). Then:
+The example config sets `generate_if_missing = true`, so on first start a
+self-signed CA is generated and written to the configured path with owner-only
+permissions. Turn that off once the CA exists (or provide your own CA key), so a
+wrong path can never silently replace the CA. Then:
 
 ```sh
 # Capabilities
@@ -117,8 +118,9 @@ Any value can also be overridden with a `BLAPKI_`-prefixed environment variable
 
 Each `[[ca]]` gets its certificate and key from one of two sources:
 
-- `key_file`: a PEM bundle (CERTIFICATE + private key block). If it is missing,
-  a self-signed CA is generated and written there on first start.
+- `key_file`: a PEM bundle (CERTIFICATE + private key block). If it is missing
+  the server refuses to start, unless `generate_if_missing = true`, in which
+  case a self-signed CA is generated and written there (mode 0600).
 - Inline PEM: `cert_pem` / `key_pem` hold the plain PEM
   (`-----BEGIN CERTIFICATE-----` / `-----BEGIN PRIVATE KEY-----`; use TOML
   triple-quoted strings for the multi-line value). The `cert_pem_env` /

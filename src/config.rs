@@ -14,6 +14,7 @@ use figment::providers::{Env, Format, Toml};
 use figment::Figment;
 use serde::Deserialize;
 
+use crate::ca::extensions;
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,7 +38,7 @@ pub struct ServerConfig {
     pub base_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CaConfig {
     /// Stable identifier referenced by profiles.
     pub id: String,
@@ -59,6 +60,11 @@ pub struct CaConfig {
     /// Name of the environment variable holding the key password
     /// (for an encrypted PKCS#8 key; optional otherwise).
     pub key_password_env: Option<String>,
+    /// Generate a self-signed CA and write it to `key_file` when that file does
+    /// not exist. Off by default: a mistyped path or an unmounted volume must
+    /// not silently replace the CA with a new one.
+    #[serde(default)]
+    pub generate_if_missing: bool,
     /// How long a freshly generated CRL is valid, in hours.
     #[serde(default = "default_crl_lifetime")]
     pub crl_lifetime_hours: u64,
@@ -66,6 +72,23 @@ pub struct CaConfig {
 
 fn default_crl_lifetime() -> u64 {
     24
+}
+
+/// Inline key material must never end up in a log line.
+impl std::fmt::Debug for CaConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaConfig")
+            .field("id", &self.id)
+            .field("key_file", &self.key_file)
+            .field("cert_pem", &self.cert_pem.as_ref().map(|_| "<set>"))
+            .field("cert_pem_env", &self.cert_pem_env)
+            .field("key_pem", &self.key_pem.as_ref().map(|_| "<redacted>"))
+            .field("key_pem_env", &self.key_pem_env)
+            .field("key_password_env", &self.key_password_env)
+            .field("generate_if_missing", &self.generate_if_missing)
+            .field("crl_lifetime_hours", &self.crl_lifetime_hours)
+            .finish()
+    }
 }
 
 impl CaConfig {
@@ -194,7 +217,23 @@ impl Settings {
         if self.ca.is_empty() {
             return Err(AppError::Config("no [[ca]] defined".into()));
         }
-        for ca in &self.ca {
+        let base_url = &self.server.base_url;
+        if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+            return Err(AppError::Config(format!(
+                "server.base_url '{base_url}' must start with http:// or https://"
+            )));
+        }
+        for (i, ca) in self.ca.iter().enumerate() {
+            check_identifier("ca id", &ca.id)?;
+            if self.ca[..i].iter().any(|other| other.id == ca.id) {
+                return Err(AppError::Config(format!("duplicate ca id '{}'", ca.id)));
+            }
+            if ca.crl_lifetime_hours == 0 {
+                return Err(AppError::Config(format!(
+                    "ca '{}': crl_lifetime_hours must be at least 1",
+                    ca.id
+                )));
+            }
             if !ca.has_source() {
                 return Err(AppError::Config(format!(
                     "ca '{}' has no key material: set key_file, or cert_pem(_env) + key_pem(_env)",
@@ -202,7 +241,25 @@ impl Settings {
                 )));
             }
         }
-        for profile in &self.profile {
+        for (i, profile) in self.profile.iter().enumerate() {
+            check_identifier("profile name", &profile.name)?;
+            if self.profile[..i].iter().any(|p| p.name == profile.name) {
+                return Err(AppError::Config(format!(
+                    "duplicate profile name '{}'",
+                    profile.name
+                )));
+            }
+            if profile.validity_days == 0 {
+                return Err(AppError::Config(format!(
+                    "profile '{}': validity_days must be at least 1",
+                    profile.name
+                )));
+            }
+            // Catch a mistyped usage here rather than on the first enrolment,
+            // after the device's one-time challenge has already been spent.
+            extensions::key_usage(&profile.key_usage)
+                .and_then(|_| extensions::extended_key_usage(&profile.extended_key_usage))
+                .map_err(|e| AppError::Config(format!("profile '{}': {e}", profile.name)))?;
             if !self.ca.iter().any(|c| c.id == profile.ca) {
                 return Err(AppError::Config(format!(
                     "profile '{}' references unknown ca '{}'",
@@ -225,12 +282,36 @@ impl Settings {
         Ok(())
     }
 
+    /// Whether any profile validates challenges against Intune.
+    pub fn uses_intune(&self) -> bool {
+        self.profile
+            .iter()
+            .any(|p| p.challenge == ChallengeMode::Intune)
+    }
+
     pub fn ca(&self, id: &str) -> Option<&CaConfig> {
         self.ca.iter().find(|c| c.id == id)
     }
 
     pub fn profile(&self, name: &str) -> Option<&ProfileConfig> {
         self.profile.iter().find(|p| p.name == name)
+    }
+}
+
+/// CA ids and profile names appear in URLs (`/scep/<name>`, `/crl/<id>`) and
+/// in the URLs embedded in issued certificates, so keep them URL-safe.
+fn check_identifier(what: &str, value: &str) -> AppResult<()> {
+    let ok = !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::Config(format!(
+            "{what} '{value}' must be 1-64 characters of [A-Za-z0-9._-]"
+        )))
     }
 }
 
@@ -255,6 +336,7 @@ mod tests {
             key_pem: None,
             key_pem_env: None,
             key_password_env: None,
+            generate_if_missing: false,
             crl_lifetime_hours: 24,
         }
     }
@@ -318,6 +400,47 @@ mod tests {
         let mut p = static_profile();
         p.ca = "ghost".into();
         assert!(settings(vec![ca_with_file()], vec![p]).validate().is_err());
+    }
+
+    #[test]
+    fn duplicate_ids_and_names_are_rejected() {
+        assert!(settings(vec![ca_with_file(), ca_with_file()], vec![])
+            .validate()
+            .is_err());
+        assert!(settings(
+            vec![ca_with_file()],
+            vec![static_profile(), static_profile()]
+        )
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn unknown_key_usage_is_rejected_at_startup() {
+        let mut p = static_profile();
+        p.key_usage = vec!["telepathy".into()];
+        assert!(settings(vec![ca_with_file()], vec![p]).validate().is_err());
+
+        let mut p = static_profile();
+        p.extended_key_usage = vec!["not an oid".into()];
+        assert!(settings(vec![ca_with_file()], vec![p]).validate().is_err());
+    }
+
+    #[test]
+    fn unsafe_identifiers_are_rejected() {
+        let mut p = static_profile();
+        p.name = "a/b".into();
+        assert!(settings(vec![ca_with_file()], vec![p]).validate().is_err());
+        let mut ca = ca_with_file();
+        ca.id = "".into();
+        assert!(settings(vec![ca], vec![]).validate().is_err());
+    }
+
+    #[test]
+    fn debug_output_redacts_inline_key() {
+        let mut ca = ca_with_file();
+        ca.key_pem = Some("-----BEGIN PRIVATE KEY-----SECRET".into());
+        assert!(!format!("{ca:?}").contains("SECRET"));
     }
 
     #[test]
