@@ -1,5 +1,6 @@
 //! blapki: a small SCEP PKI server for issuing certificates to Intune devices.
 
+pub mod admin;
 pub mod app;
 pub mod ca;
 pub mod challenge;

@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use der::{Decode, Encode};
+use x509_cert::ext::pkix::CrlReason;
 use x509_ocsp::builder::OcspResponseBuilder;
 use x509_ocsp::{CertStatus, OcspGeneralizedTime, OcspRequest, RevokedInfo, SingleResponse};
 
@@ -106,7 +107,7 @@ fn to_cert_status(status: &RevocationStatus) -> CertStatus {
     match status {
         RevocationStatus::Good => CertStatus::good(),
         RevocationStatus::Unknown => CertStatus::unknown(),
-        RevocationStatus::Revoked { revoked_at, .. } => {
+        RevocationStatus::Revoked { revoked_at, reason } => {
             let revocation_time = revoked_at
                 .as_deref()
                 .and_then(parse_rfc3339)
@@ -114,10 +115,26 @@ fn to_cert_status(status: &RevocationStatus) -> CertStatus {
                 .unwrap_or_else(ocsp_now);
             CertStatus::Revoked(RevokedInfo {
                 revocation_time,
-                revocation_reason: None,
+                revocation_reason: reason.and_then(crl_reason),
             })
         }
     }
+}
+
+/// Map a stored RFC 5280 reason code to the OCSP/CRL enum.
+pub(crate) fn crl_reason(code: i64) -> Option<CrlReason> {
+    Some(match code {
+        0 => CrlReason::Unspecified,
+        1 => CrlReason::KeyCompromise,
+        2 => CrlReason::CaCompromise,
+        3 => CrlReason::AffiliationChanged,
+        4 => CrlReason::Superseded,
+        5 => CrlReason::CessationOfOperation,
+        6 => CrlReason::CertificateHold,
+        9 => CrlReason::PrivilegeWithdrawn,
+        10 => CrlReason::AaCompromise,
+        _ => return None,
+    })
 }
 
 fn signer_for(ca: &CertificateAuthority) -> CaSigningKey {

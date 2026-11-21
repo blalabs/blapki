@@ -16,7 +16,7 @@ use crate::crypto::verify::ParsedRequest;
 use crate::crypto::{degenerate, envelope, sign, verify};
 use crate::db::repo::{self, IssuedCertificate};
 use crate::error::{AppError, AppResult};
-use crate::http::{ProfileRuntime, Shared};
+use crate::http::{now_utc, ProfileRuntime, Shared};
 use crate::intune::IssuedInfo;
 use crate::scep::attributes::{FailInfo, MessageType};
 use crate::scep::protocol;
@@ -299,20 +299,6 @@ fn serial_decimal(cert: &x509_cert::Certificate) -> String {
 
 fn time_to_utc(t: &x509_cert::time::Time) -> String {
     let dt = t.to_date_time();
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        dt.year(),
-        dt.month(),
-        dt.day(),
-        dt.hour(),
-        dt.minutes(),
-        dt.seconds()
-    )
-}
-
-fn now_utc() -> String {
-    let dt = der::DateTime::from_system_time(std::time::SystemTime::now())
-        .unwrap_or(der::DateTime::INFINITY);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         dt.year(),

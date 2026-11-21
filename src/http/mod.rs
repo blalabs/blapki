@@ -72,3 +72,19 @@ pub fn router(state: Shared) -> Router {
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
+
+/// The current time as an RFC 3339 UTC timestamp, the format used for every
+/// timestamp column in the database.
+pub fn now_utc() -> String {
+    let dt = der::DateTime::from_system_time(std::time::SystemTime::now())
+        .unwrap_or(der::DateTime::INFINITY);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minutes(),
+        dt.seconds()
+    )
+}

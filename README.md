@@ -91,6 +91,21 @@ openssl x509 -in device.crt -noout -subject -issuer -ext subjectAltName
 
 Windows and Intune append `/pkiclient.exe`; that path maps to the same handlers.
 
+## Revoking a certificate
+
+Revocation is an operator command, run on the host with the same configuration
+as the server (there is no HTTP admin API):
+
+```sh
+blapki revoke <ca> <serial-hex> [reason]
+# e.g.
+blapki revoke default 3A:BC:01:...:9F keyCompromise
+```
+
+The serial is the hex serial as printed by `openssl x509 -noout -serial`. The
+certificate is reported as revoked by OCSP immediately and appears in the next
+CRL that is fetched.
+
 ## Configuration
 
 See [config.example.toml](config.example.toml). Secrets are never stored in the
