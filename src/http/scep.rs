@@ -42,6 +42,9 @@ pub async fn scep_get(
             let message = params
                 .get("message")
                 .ok_or_else(|| AppError::bad_request("missing 'message' parameter"))?;
+            // Clients that do not percent-encode the base64 send a raw '+',
+            // which query-string decoding turns into a space.
+            let message = message.replace(' ', "+");
             let body = base64::engine::general_purpose::STANDARD
                 .decode(message.as_bytes())
                 .map_err(|e| AppError::bad_request(format!("bad base64 message: {e}")))?;

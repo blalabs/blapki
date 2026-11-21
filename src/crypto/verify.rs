@@ -19,18 +19,21 @@ use const_oid::ObjectIdentifier;
 use der::asn1::{Any, OctetString};
 use der::{Decode, Encode, Sequence, SliceReader};
 use rsa::RsaPublicKey;
-use sha2::Digest;
-use signature::Verifier;
 use spki::AlgorithmIdentifierOwned;
 use x509_cert::attr::{Attribute, Attributes};
 use x509_cert::certificate::{CertificateInner, Raw};
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 
-use crate::crypto::{envelope, oids, rsa_public_key_from_spki};
+use crate::crypto::{envelope, oids, rsa_public_key_from_spki, HashAlg};
 use crate::error::{AppError, AppResult};
 use crate::scep::attributes as scep_attr;
 use crate::scep::attributes::MessageType;
+
+/// Longest transaction id accepted (also the width of the database column).
+const MAX_TRANSACTION_ID_LEN: usize = 128;
+/// Longest sender nonce accepted. RFC 8894 nonces are 16 bytes.
+const MAX_NONCE_LEN: usize = 64;
 
 /// A certificate parsed without the RFC 5280 serial-length constraint.
 type RelaxedCertificate = CertificateInner<Raw>;
@@ -158,6 +161,10 @@ pub fn parse_and_verify(der: &[u8]) -> AppResult<ParsedRequest> {
         MessageType::from_value(&scep_attr::read_string(attrs, scep_attr::ID_MESSAGE_TYPE)?)?;
     let transaction_id = scep_attr::read_string(attrs, scep_attr::ID_TRANSACTION_ID)?;
     let sender_nonce = scep_attr::read_octets(attrs, scep_attr::ID_SENDER_NONCE)?;
+    check_transaction_id(&transaction_id)?;
+    if sender_nonce.is_empty() || sender_nonce.len() > MAX_NONCE_LEN {
+        return Err(AppError::bad_request("senderNonce has an invalid length"));
+    }
 
     // PKCSReq / RenewalReq carry an enveloped CSR; a SUCCESS CertRep carries an
     // enveloped certs-only reply.
@@ -195,29 +202,35 @@ fn verify_rsa(
     msg: &[u8],
     sig: &[u8],
 ) -> AppResult<()> {
-    let signature = rsa::pkcs1v15::Signature::try_from(sig)
-        .map_err(|e| AppError::bad_request(format!("malformed signature: {e}")))?;
-    let result =
-        match digest_oid {
-            oids::ID_SHA256 => rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(pubkey.clone())
-                .verify(msg, &signature),
-            oids::ID_SHA1 => rsa::pkcs1v15::VerifyingKey::<sha1::Sha1>::new(pubkey.clone())
-                .verify(msg, &signature),
-            other => {
-                return Err(AppError::bad_request(format!(
-                    "unsupported signature digest {other}"
-                )))
-            }
-        };
-    result.map_err(|_| AppError::bad_request("SCEP message signature is invalid"))
+    let alg = HashAlg::from_digest_oid(digest_oid).ok_or_else(|| {
+        AppError::bad_request(format!("unsupported signature digest {digest_oid}"))
+    })?;
+    if alg.verify_rsa(pubkey, msg, sig) {
+        Ok(())
+    } else {
+        Err(AppError::bad_request("SCEP message signature is invalid"))
+    }
 }
 
 fn digest(oid: ObjectIdentifier, data: &[u8]) -> AppResult<Vec<u8>> {
-    Ok(match oid {
-        oids::ID_SHA256 => sha2::Sha256::digest(data).to_vec(),
-        oids::ID_SHA1 => sha1::Sha1::digest(data).to_vec(),
-        other => return Err(AppError::bad_request(format!("unsupported digest {other}"))),
-    })
+    HashAlg::from_digest_oid(oid)
+        .map(|alg| alg.digest(data))
+        .ok_or_else(|| AppError::bad_request(format!("unsupported digest {oid}")))
+}
+
+/// The transaction id is chosen by the client and ends up in logs, the
+/// database and outbound HTTP headers, so only short printable ASCII is
+/// accepted.
+fn check_transaction_id(id: &str) -> AppResult<()> {
+    if id.is_empty() || id.len() > MAX_TRANSACTION_ID_LEN {
+        return Err(AppError::bad_request("transactionID has an invalid length"));
+    }
+    if !id.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(AppError::bad_request(
+            "transactionID contains non-printable characters",
+        ));
+    }
+    Ok(())
 }
 
 fn find_attr<'a>(
@@ -225,4 +238,18 @@ fn find_attr<'a>(
     oid: ObjectIdentifier,
 ) -> Option<&'a Attribute> {
     attrs.find(|a| a.oid == oid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_ids_are_restricted() {
+        assert!(check_transaction_id("2F3C9A-abc_01").is_ok());
+        assert!(check_transaction_id("").is_err());
+        assert!(check_transaction_id("has space").is_err());
+        assert!(check_transaction_id("line\nbreak").is_err());
+        assert!(check_transaction_id(&"a".repeat(129)).is_err());
+    }
 }

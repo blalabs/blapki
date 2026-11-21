@@ -3,6 +3,7 @@
 
 use core::time::Duration;
 use std::str::FromStr;
+use std::time::SystemTime;
 
 use der::referenced::OwnedToRef;
 use rsa::RsaPrivateKey;
@@ -11,12 +12,15 @@ use x509_cert::builder::{Builder, CertificateBuilder, Profile};
 use x509_cert::ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, SubjectKeyIdentifier};
 use x509_cert::name::Name;
 use x509_cert::spki::SubjectPublicKeyInfoOwned;
-use x509_cert::time::Validity;
+use x509_cert::time::{Time, Validity};
 use x509_cert::Certificate;
 
 use crate::ca::{extensions, serial};
 use crate::crypto::CaSigningKey;
 use crate::error::{AppError, AppResult};
+
+/// How far `notBefore` is backdated to tolerate device clock skew.
+const NOT_BEFORE_BACKDATE: Duration = Duration::from_secs(5 * 60);
 
 /// Parameters controlling how a leaf certificate is issued.
 pub struct IssueOptions {
@@ -93,20 +97,13 @@ impl CertificateAuthority {
         opts: &IssueOptions,
     ) -> AppResult<Certificate> {
         let serial = serial::random_serial();
-        let validity = Validity::from_now(Duration::from_secs(opts.validity_days as u64 * 86_400))
-            .map_err(der_err)?;
+        let validity = self.leaf_validity(opts.validity_days)?;
         let subject = csr.info.subject.clone();
         let spki = csr.info.public_key.clone();
 
         let ski = SubjectKeyIdentifier::try_from(spki.owned_to_ref())
             .map_err(|e| AppError::crypto(format!("subject key identifier: {e}")))?;
-        let aki = AuthorityKeyIdentifier::try_from(
-            self.cert
-                .tbs_certificate
-                .subject_public_key_info
-                .owned_to_ref(),
-        )
-        .map_err(|e| AppError::crypto(format!("authority key identifier: {e}")))?;
+        let aki = self.authority_key_identifier()?;
 
         let mut builder = CertificateBuilder::new(
             Profile::Manual {
@@ -150,6 +147,52 @@ impl CertificateAuthority {
         }
 
         builder.build::<rsa::pkcs1v15::Signature>().map_err(bld_err)
+    }
+}
+
+impl CertificateAuthority {
+    /// Validity window for a leaf issued now. `notBefore` is backdated a few
+    /// minutes so a device whose clock runs slightly behind does not see its
+    /// new certificate as "not yet valid", and `notAfter` never exceeds the
+    /// CA certificate's own expiry.
+    fn leaf_validity(&self, validity_days: u32) -> AppResult<Validity> {
+        let now = SystemTime::now();
+        let ca_validity = &self.cert.tbs_certificate.validity;
+        let ca_not_before = ca_validity.not_before.to_system_time();
+        let ca_not_after = ca_validity.not_after.to_system_time();
+        if now >= ca_not_after {
+            return Err(AppError::crypto("CA certificate has expired"));
+        }
+        let not_before = now
+            .checked_sub(NOT_BEFORE_BACKDATE)
+            .unwrap_or(now)
+            .max(ca_not_before);
+        let not_after =
+            (now + Duration::from_secs(validity_days as u64 * 86_400)).min(ca_not_after);
+        Ok(Validity {
+            not_before: Time::try_from(not_before).map_err(der_err)?,
+            not_after: Time::try_from(not_after).map_err(der_err)?,
+        })
+    }
+
+    /// The AKI for issued certificates. It must equal the CA certificate's
+    /// subject key identifier, so that is copied when present (an imported CA
+    /// may not use the SHA-1 method); otherwise it is derived from the key.
+    fn authority_key_identifier(&self) -> AppResult<AuthorityKeyIdentifier> {
+        if let Ok(Some((_, ski))) = self.cert.tbs_certificate.get::<SubjectKeyIdentifier>() {
+            return Ok(AuthorityKeyIdentifier {
+                key_identifier: Some(ski.0),
+                authority_cert_issuer: None,
+                authority_cert_serial_number: None,
+            });
+        }
+        AuthorityKeyIdentifier::try_from(
+            self.cert
+                .tbs_certificate
+                .subject_public_key_info
+                .owned_to_ref(),
+        )
+        .map_err(|e| AppError::crypto(format!("authority key identifier: {e}")))
     }
 }
 

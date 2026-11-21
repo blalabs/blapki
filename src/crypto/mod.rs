@@ -34,6 +34,17 @@ pub mod oids {
 
     pub const ID_SHA1: ObjectIdentifier = const_oid::db::rfc5912::ID_SHA_1;
     pub const ID_SHA256: ObjectIdentifier = const_oid::db::rfc5912::ID_SHA_256;
+    pub const ID_SHA384: ObjectIdentifier = const_oid::db::rfc5912::ID_SHA_384;
+    pub const ID_SHA512: ObjectIdentifier = const_oid::db::rfc5912::ID_SHA_512;
+
+    pub const RSA_ENCRYPTION: ObjectIdentifier = const_oid::db::rfc5912::RSA_ENCRYPTION;
+    pub const SHA1_WITH_RSA: ObjectIdentifier = const_oid::db::rfc5912::SHA_1_WITH_RSA_ENCRYPTION;
+    pub const SHA256_WITH_RSA: ObjectIdentifier =
+        const_oid::db::rfc5912::SHA_256_WITH_RSA_ENCRYPTION;
+    pub const SHA384_WITH_RSA: ObjectIdentifier =
+        const_oid::db::rfc5912::SHA_384_WITH_RSA_ENCRYPTION;
+    pub const SHA512_WITH_RSA: ObjectIdentifier =
+        const_oid::db::rfc5912::SHA_512_WITH_RSA_ENCRYPTION;
 
     pub const ID_AES_128_CBC: ObjectIdentifier = const_oid::db::rfc5911::ID_AES_128_CBC;
     pub const ID_AES_192_CBC: ObjectIdentifier = const_oid::db::rfc5911::ID_AES_192_CBC;
@@ -70,8 +81,75 @@ pub fn rsa_public_key(cert: &Certificate) -> AppResult<RsaPublicKey> {
 /// Extract an RSA public key from a `SubjectPublicKeyInfo`.
 pub fn rsa_public_key_from_spki(spki: &spki::SubjectPublicKeyInfoOwned) -> AppResult<RsaPublicKey> {
     use rsa::pkcs1::DecodeRsaPublicKey;
+    if spki.algorithm.oid != oids::RSA_ENCRYPTION {
+        return Err(AppError::crypto(format!(
+            "not an RSA key (algorithm {})",
+            spki.algorithm.oid
+        )));
+    }
     RsaPublicKey::from_pkcs1_der(spki.subject_public_key.raw_bytes())
         .map_err(|e| AppError::crypto(format!("not an RSA key: {e}")))
+}
+
+/// The hash functions accepted in signatures from SCEP clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashAlg {
+    Sha1,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl HashAlg {
+    /// Resolve a digest algorithm OID (as used in a CMS `SignerInfo`).
+    pub fn from_digest_oid(oid: ObjectIdentifier) -> Option<Self> {
+        Some(match oid {
+            oids::ID_SHA1 => Self::Sha1,
+            oids::ID_SHA256 => Self::Sha256,
+            oids::ID_SHA384 => Self::Sha384,
+            oids::ID_SHA512 => Self::Sha512,
+            _ => return None,
+        })
+    }
+
+    /// Resolve an RSA PKCS#1 v1.5 signature algorithm OID (as used in a CSR).
+    pub fn from_rsa_signature_oid(oid: ObjectIdentifier) -> Option<Self> {
+        Some(match oid {
+            oids::SHA1_WITH_RSA => Self::Sha1,
+            oids::SHA256_WITH_RSA => Self::Sha256,
+            oids::SHA384_WITH_RSA => Self::Sha384,
+            oids::SHA512_WITH_RSA => Self::Sha512,
+            _ => return None,
+        })
+    }
+
+    /// Hash `data`.
+    pub fn digest(self, data: &[u8]) -> Vec<u8> {
+        use sha2::Digest;
+        match self {
+            Self::Sha1 => sha1::Sha1::digest(data).to_vec(),
+            Self::Sha256 => sha2::Sha256::digest(data).to_vec(),
+            Self::Sha384 => sha2::Sha384::digest(data).to_vec(),
+            Self::Sha512 => sha2::Sha512::digest(data).to_vec(),
+        }
+    }
+
+    /// Verify an RSA PKCS#1 v1.5 signature over `msg`.
+    pub fn verify_rsa(self, key: &RsaPublicKey, msg: &[u8], sig: &[u8]) -> bool {
+        use rsa::pkcs1v15::{Signature, VerifyingKey};
+        use signature::Verifier;
+        let Ok(sig) = Signature::try_from(sig) else {
+            return false;
+        };
+        let key = key.clone();
+        match self {
+            Self::Sha1 => VerifyingKey::<sha1::Sha1>::new(key).verify(msg, &sig),
+            Self::Sha256 => VerifyingKey::<sha2::Sha256>::new(key).verify(msg, &sig),
+            Self::Sha384 => VerifyingKey::<sha2::Sha384>::new(key).verify(msg, &sig),
+            Self::Sha512 => VerifyingKey::<sha2::Sha512>::new(key).verify(msg, &sig),
+        }
+        .is_ok()
+    }
 }
 
 fn der_err(e: der::Error) -> AppError {

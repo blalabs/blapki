@@ -102,11 +102,12 @@ impl ChallengeValidator for IntuneValidator {
     }
 }
 
-/// Constant-time byte-slice equality (avoids leaking the secret via timing).
+/// Constant-time equality. Both inputs are hashed first, so the comparison
+/// runs over fixed-length digests and reveals neither the contents nor the
+/// length of the secret through timing.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    use sha2::{Digest, Sha256};
+    let (a, b) = (Sha256::digest(a), Sha256::digest(b));
     let mut diff = 0u8;
     for (x, y) in a.iter().zip(b.iter()) {
         diff |= x ^ y;

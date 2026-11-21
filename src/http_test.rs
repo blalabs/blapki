@@ -479,3 +479,73 @@ async fn enrolment_fails_when_the_certificate_cannot_be_recorded() {
         "an untracked certificate must not be issued"
     );
 }
+
+/// `GetCACaps` advertises SHA-512, so a request signed with it must verify.
+#[test]
+fn sha512_signed_request_is_accepted() {
+    use cms::builder::{SignedDataBuilder, SignerInfoBuilder};
+    use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
+    use cms::signed_data::{EncapsulatedContentInfo, SignerIdentifier};
+    use spki::AlgorithmIdentifierOwned;
+
+    let device = CertificateAuthority::generate_self_signed("dev", "dev", 2048).unwrap();
+    let signer = rsa::pkcs1v15::SigningKey::<sha2::Sha512>::new(device.private_key.clone());
+    let content = OctetString::new(b"payload".to_vec()).unwrap();
+    let encap = EncapsulatedContentInfo {
+        econtent_type: oids::ID_DATA,
+        econtent: Some(Any::encode_from(&content).unwrap()),
+    };
+    let sid = SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
+        issuer: device.cert.tbs_certificate.issuer.clone(),
+        serial_number: device.cert.tbs_certificate.serial_number.clone(),
+    });
+    let digest = AlgorithmIdentifierOwned {
+        oid: oids::ID_SHA512,
+        parameters: None,
+    };
+    let mut info = SignerInfoBuilder::new(&signer, sid, digest.clone(), &encap, None).unwrap();
+    for a in [
+        attr::printable_attribute(
+            attr::ID_MESSAGE_TYPE,
+            MessageType::GetCertInitial.as_value(),
+        )
+        .unwrap(),
+        attr::printable_attribute(attr::ID_TRANSACTION_ID, "txn-sha512").unwrap(),
+        attr::octet_attribute(attr::ID_SENDER_NONCE, &nonce::generate()).unwrap(),
+    ] {
+        info.add_signed_attribute(a).unwrap();
+    }
+    let mut builder = SignedDataBuilder::new(&encap);
+    builder
+        .add_digest_algorithm(digest)
+        .unwrap()
+        .add_certificate(CertificateChoices::Certificate(device.cert.clone()))
+        .unwrap()
+        .add_signer_info::<rsa::pkcs1v15::SigningKey<sha2::Sha512>, rsa::pkcs1v15::Signature>(info)
+        .unwrap();
+    let der = builder.build().unwrap().to_der().unwrap();
+
+    let parsed = verify::parse_and_verify(&der).expect("SHA-512 signature must verify");
+    assert_eq!(parsed.transaction_id, "txn-sha512");
+}
+
+#[tokio::test]
+async fn issued_certificate_is_backdated_and_within_ca_validity() {
+    let ca = CertificateAuthority::generate_self_signed("default", "Validity CA", 2048).unwrap();
+    let device = CertificateAuthority::generate_self_signed("dev", "dev", 2048).unwrap();
+    let csr = crate::ca::csr::parse(&build_csr(&device, "CN=validity", SECRET)).unwrap();
+    let opts = crate::ca::IssueOptions {
+        // Far longer than the CA lives: must be clamped.
+        validity_days: 36_500,
+        key_usage: vec!["digitalSignature".into()],
+        extended_key_usage: vec![],
+        ocsp_url: None,
+        crl_url: None,
+    };
+    let leaf = ca.issue(&csr.req, &opts).unwrap();
+    let v = &leaf.tbs_certificate.validity;
+    let ca_v = &ca.cert.tbs_certificate.validity;
+    assert!(v.not_after.to_system_time() <= ca_v.not_after.to_system_time());
+    assert!(v.not_before.to_system_time() <= std::time::SystemTime::now());
+    assert!(v.not_before.to_system_time() >= ca_v.not_before.to_system_time());
+}
