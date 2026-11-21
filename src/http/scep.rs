@@ -139,7 +139,7 @@ async fn pki_operation(state: &Shared, profile: &str, body: &[u8]) -> AppResult<
     if let Err(e) = rt.validator.validate(&input).await {
         tracing::warn!(profile, txn = %parsed.transaction_id, error = %e, "challenge validation failed");
         let _ = rt.validator.on_failure(&input, &e.to_string()).await;
-        let _ = record(state, rt, &parsed, "failed", "PKCSReq").await;
+        let _ = record(state, rt, &parsed, repo::STATUS_FAILED, "PKCSReq").await;
         return build_failure(ca, &parsed, FailInfo::BadRequest);
     }
 
@@ -163,9 +163,16 @@ async fn pki_operation(state: &Shared, profile: &str, body: &[u8]) -> AppResult<
         .to_der()
         .map_err(|e| AppError::crypto(format!("encode issued cert: {e}")))?;
 
-    // Persist and notify (best effort; a certificate was issued regardless).
+    // Record the certificate before it leaves the server. A certificate that
+    // is not in the database is `unknown` to OCSP and can never be revoked, so
+    // a failed write aborts the enrolment; the client can retry.
     if let Err(e) = persist(state, rt, ca, &parsed, &issued, &issued_der).await {
-        tracing::error!(error = %e, "failed to persist issued certificate");
+        tracing::error!(error = %e, "failed to persist issued certificate; not releasing it");
+        let _ = rt
+            .validator
+            .on_failure(&input, "certificate could not be recorded")
+            .await;
+        return Err(e);
     }
     let info = issued_info(ca, &issued, &issued_der);
     if let Err(e) = rt.validator.on_issued(&input, &info).await {
@@ -240,7 +247,7 @@ async fn record(
 }
 
 async fn record_ok(state: &Shared, rt: &ProfileRuntime, parsed: &ParsedRequest) -> AppResult<()> {
-    record(state, rt, parsed, "issued", "PKCSReq").await
+    record(state, rt, parsed, repo::STATUS_ISSUED, "PKCSReq").await
 }
 
 fn issued_info(

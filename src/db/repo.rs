@@ -8,6 +8,10 @@ use crate::error::AppResult;
 pub const STATUS_VALID: &str = "valid";
 pub const STATUS_REVOKED: &str = "revoked";
 
+/// Transaction status values.
+pub const STATUS_ISSUED: &str = "issued";
+pub const STATUS_FAILED: &str = "failed";
+
 /// A record of a certificate this server issued.
 #[derive(Debug, Clone)]
 pub struct IssuedCertificate {
@@ -154,7 +158,9 @@ pub async fn record_transaction(
     message_type: &str,
     created_at: &str,
 ) -> AppResult<()> {
-    // Upsert-ish: ignore if the transaction id already exists.
+    // Upsert by transaction id. The id is chosen by the (unauthenticated)
+    // client, so a later failed attempt must never overwrite the record of a
+    // transaction that already produced a certificate.
     let existing =
         sqlx::query("SELECT transaction_id FROM scep_transaction WHERE transaction_id = ?")
             .bind(transaction_id)
@@ -162,11 +168,13 @@ pub async fn record_transaction(
             .await?;
     if existing.is_some() {
         sqlx::query(
-            "UPDATE scep_transaction SET status = ?, message_type = ? WHERE transaction_id = ?",
+            "UPDATE scep_transaction SET status = ?, message_type = ?
+             WHERE transaction_id = ? AND status <> ?",
         )
         .bind(status)
         .bind(message_type)
         .bind(transaction_id)
+        .bind(STATUS_ISSUED)
         .execute(pool)
         .await?;
     } else {
@@ -275,6 +283,16 @@ mod tests {
         )
         .await
         .unwrap();
+        // The failed attempt did not overwrite the issued record.
+        let status: String =
+            sqlx::query("SELECT status FROM scep_transaction WHERE transaction_id = ?")
+                .bind("txn-1")
+                .fetch_one(&p)
+                .await
+                .unwrap()
+                .try_get("status")
+                .unwrap();
+        assert_eq!(status, STATUS_ISSUED);
         let n: i64 =
             sqlx::query("SELECT COUNT(*) AS n FROM scep_transaction WHERE transaction_id = ?")
                 .bind("txn-1")

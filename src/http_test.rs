@@ -454,3 +454,28 @@ async fn recipient_named_by_ca_issuer_and_serial_is_selected() {
     assert!(fail_info(&body).is_none(), "expected a SUCCESS CertRep");
     assert_eq!(issued_count(&state).await, 1);
 }
+
+#[tokio::test]
+async fn enrolment_fails_when_the_certificate_cannot_be_recorded() {
+    let (state, ca) = test_state("blapki_http_nopersist.db").await;
+    sqlx::query("DROP TABLE issued_certificate")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let device = CertificateAuthority::generate_self_signed("dev", "dev", 2048).unwrap();
+    let csr = build_csr(&device, "CN=device-http-03", SECRET);
+    let request = build_pkcsreq(&device, &ca, &csr, "txn-nopersist");
+
+    // No certificate may be released if it could not be stored.
+    let result = scep_post(
+        State(state.clone()),
+        Path("test".to_string()),
+        Query(HashMap::new()),
+        Bytes::from(request),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "an untracked certificate must not be issued"
+    );
+}
