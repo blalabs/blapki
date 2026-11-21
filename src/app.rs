@@ -25,7 +25,8 @@ pub async fn build_state(settings: &Settings) -> AppResult<Shared> {
 
     let mut cas = HashMap::new();
     for ca_cfg in &settings.ca {
-        let ca = load_or_bootstrap_ca(ca_cfg)?;
+        let mut ca = load_or_bootstrap_ca(ca_cfg)?;
+        ca.crl_lifetime_hours = ca_cfg.crl_lifetime_hours;
         cas.insert(ca_cfg.id.clone(), Arc::new(ca));
     }
 

@@ -15,17 +15,23 @@ use base64::Engine;
 use der::{Decode, Encode};
 use x509_cert::ext::pkix::CrlReason;
 use x509_ocsp::builder::OcspResponseBuilder;
-use x509_ocsp::{CertStatus, OcspGeneralizedTime, OcspRequest, RevokedInfo, SingleResponse};
+use x509_ocsp::{
+    CertId, CertStatus, OcspGeneralizedTime, OcspRequest, RevokedInfo, SingleResponse,
+};
 
 use crate::ca::CertificateAuthority;
-use crate::crypto::CaSigningKey;
+use crate::crypto::HashAlg;
 use crate::db::repo::{self, RevocationStatus};
 use crate::error::{AppError, AppResult};
-use crate::http::Shared;
+use crate::http::{blocking, Shared};
 
 const CT_OCSP: &str = "application/ocsp-response";
 /// How long a response is valid before a client should re-check.
 const NEXT_UPDATE_SECS: u64 = 3600;
+/// Most certificates one request may ask about (each costs a database query).
+const MAX_REQUESTS: usize = 32;
+/// Largest nonce echoed back (RFC 8954).
+const MAX_NONCE_LEN: usize = 32;
 
 /// `POST /ocsp/{ca}`: request body is a DER OCSPRequest.
 pub async fn ocsp_post(
@@ -41,7 +47,9 @@ pub async fn ocsp_get(
     State(state): State<Shared>,
     Path((ca, b64)): Path<(String, String)>,
 ) -> Response {
-    match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+    // A client that did not percent-encode the base64 has its '+' intact here
+    // (paths are not form-decoded) and its '/' captured by the wildcard.
+    match base64::engine::general_purpose::STANDARD.decode(b64.trim_matches('/').as_bytes()) {
         Ok(der) => respond(&state, &ca, &der).await,
         Err(_) => (StatusCode::BAD_REQUEST, "invalid base64 OCSP request").into_response(),
     }
@@ -67,10 +75,18 @@ async fn build_response(state: &Shared, ca_id: &str, req_der: &[u8]) -> AppResul
     let ca = state
         .cas
         .get(ca_id)
-        .ok_or_else(|| AppError::NotFound(format!("unknown CA '{ca_id}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("unknown CA '{ca_id}'")))?
+        .clone();
 
     let request = OcspRequest::from_der(req_der)
         .map_err(|e| AppError::bad_request(format!("invalid OCSP request: {e}")))?;
+    let entries = &request.tbs_request.request_list;
+    if entries.len() > MAX_REQUESTS {
+        return Err(AppError::bad_request(format!(
+            "OCSP request asks about {} certificates; at most {MAX_REQUESTS} are allowed",
+            entries.len()
+        )));
+    }
 
     let this_update = ocsp_now();
     let next_update =
@@ -79,9 +95,15 @@ async fn build_response(state: &Shared, ca_id: &str, req_der: &[u8]) -> AppResul
 
     let mut builder = OcspResponseBuilder::new(ca.cert.tbs_certificate.subject.clone());
 
-    for entry in &request.tbs_request.request_list {
-        let serial_hex = hex::encode(entry.req_cert.serial_number.as_bytes());
-        let status = repo::status_by_serial(&state.db, ca_id, &serial_hex).await?;
+    for entry in entries {
+        // Only answer for certificates of this CA: a CertID naming another
+        // issuer is `unknown`, whatever its serial.
+        let status = if cert_id_names_ca(&entry.req_cert, &ca) {
+            let serial_hex = hex::encode(entry.req_cert.serial_number.as_bytes());
+            repo::status_by_serial(&state.db, ca_id, &serial_hex).await?
+        } else {
+            RevocationStatus::Unknown
+        };
         let cert_status = to_cert_status(&status);
         let single = SingleResponse::new(entry.req_cert.clone(), cert_status, this_update)
             .with_next_update(next_update);
@@ -89,18 +111,39 @@ async fn build_response(state: &Shared, ca_id: &str, req_der: &[u8]) -> AppResul
     }
 
     if let Some(nonce) = request.nonce() {
-        builder = builder
-            .with_extension(nonce)
-            .map_err(|e| AppError::crypto(format!("OCSP nonce: {e}")))?;
+        // RFC 8954 limits the nonce to 32 octets; do not sign larger blobs.
+        if nonce.0.as_bytes().len() <= MAX_NONCE_LEN {
+            builder = builder
+                .with_extension(nonce)
+                .map_err(|e| AppError::crypto(format!("OCSP nonce: {e}")))?;
+        }
     }
 
-    let mut signer = signer_for(ca);
-    let response = builder
-        .sign(&mut signer, Some(vec![ca.cert.clone()]), this_update)
-        .map_err(|e| AppError::crypto(format!("signing OCSP response: {e}")))?;
-    response
-        .to_der()
-        .map_err(|e| AppError::crypto(format!("encode OCSP response: {e}")))
+    blocking(move || {
+        let mut signer = ca.signing_key.clone();
+        let response = builder
+            .sign(&mut signer, Some(vec![ca.cert.clone()]), this_update)
+            .map_err(|e| AppError::crypto(format!("signing OCSP response: {e}")))?;
+        response
+            .to_der()
+            .map_err(|e| AppError::crypto(format!("encode OCSP response: {e}")))
+    })
+    .await
+}
+
+/// Whether a request's `CertID` identifies `ca` as the issuer (RFC 6960
+/// 4.1.1): the hashes of the issuer's name and public key must both match.
+fn cert_id_names_ca(id: &CertId, ca: &CertificateAuthority) -> bool {
+    let Some(alg) = HashAlg::from_digest_oid(id.hash_algorithm.oid) else {
+        return false;
+    };
+    let tbs = &ca.cert.tbs_certificate;
+    let Ok(name_der) = tbs.subject.to_der() else {
+        return false;
+    };
+    let key_bytes = tbs.subject_public_key_info.subject_public_key.raw_bytes();
+    id.issuer_name_hash.as_bytes() == alg.digest(&name_der).as_slice()
+        && id.issuer_key_hash.as_bytes() == alg.digest(key_bytes).as_slice()
 }
 
 fn to_cert_status(status: &RevocationStatus) -> CertStatus {
@@ -135,10 +178,6 @@ pub(crate) fn crl_reason(code: i64) -> Option<CrlReason> {
         10 => CrlReason::AaCompromise,
         _ => return None,
     })
-}
-
-fn signer_for(ca: &CertificateAuthority) -> CaSigningKey {
-    CaSigningKey::new(ca.private_key.clone())
 }
 
 fn ocsp_now() -> OcspGeneralizedTime {

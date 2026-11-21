@@ -41,7 +41,12 @@ pub struct CertificateAuthority {
     pub signing_key: CaSigningKey,
     /// Raw private key, used to decrypt SCEP `EnvelopedData`.
     pub private_key: RsaPrivateKey,
+    /// How long a published CRL is valid, in hours.
+    pub crl_lifetime_hours: u64,
 }
+
+/// CRL lifetime used unless the configuration says otherwise.
+pub const DEFAULT_CRL_LIFETIME_HOURS: u64 = 24;
 
 impl CertificateAuthority {
     /// Construct from an existing certificate and private key.
@@ -52,6 +57,7 @@ impl CertificateAuthority {
             cert,
             signing_key,
             private_key,
+            crl_lifetime_hours: DEFAULT_CRL_LIFETIME_HOURS,
         }
     }
 
@@ -82,6 +88,7 @@ impl CertificateAuthority {
             cert,
             signing_key,
             private_key,
+            crl_lifetime_hours: DEFAULT_CRL_LIFETIME_HOURS,
         })
     }
 
@@ -181,7 +188,7 @@ impl CertificateAuthority {
     /// The AKI for issued certificates. It must equal the CA certificate's
     /// subject key identifier, so that is copied when present (an imported CA
     /// may not use the SHA-1 method); otherwise it is derived from the key.
-    fn authority_key_identifier(&self) -> AppResult<AuthorityKeyIdentifier> {
+    pub fn authority_key_identifier(&self) -> AppResult<AuthorityKeyIdentifier> {
         if let Ok(Some((_, ski))) = self.cert.tbs_certificate.get::<SubjectKeyIdentifier>() {
             return Ok(AuthorityKeyIdentifier {
                 key_identifier: Some(ski.0),

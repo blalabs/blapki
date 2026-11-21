@@ -15,6 +15,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::ca::CertificateAuthority;
 use crate::challenge::ChallengeValidator;
+use crate::error::{AppError, AppResult};
 
 /// Per-profile runtime state assembled from config.
 pub struct ProfileRuntime {
@@ -67,10 +68,23 @@ pub fn router(state: Shared) -> Router {
         )
         // OCSP: POST a request body, or GET with the base64 request in the path.
         .route("/ocsp/{ca}", get(ocsp::ocsp_get_root).post(ocsp::ocsp_post))
-        .route("/ocsp/{ca}/{b64}", get(ocsp::ocsp_get))
+        // The base64 may contain '/', so the request takes the rest of the path.
+        .route("/ocsp/{ca}/{*b64}", get(ocsp::ocsp_get))
         .route("/crl/{ca}", get(crl::crl))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Run CPU-heavy work (RSA private-key operations) off the async workers so a
+/// burst of requests cannot stall the rest of the server.
+pub(crate) async fn blocking<T, F>(f: F) -> AppResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> AppResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("worker task failed: {e}")))?
 }
 
 /// The current time as an RFC 3339 UTC timestamp, the format used for every

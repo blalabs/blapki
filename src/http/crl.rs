@@ -9,22 +9,24 @@ use std::time::{Duration, SystemTime};
 use axum::extract::{Path, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
-use der::asn1::{GeneralizedTime, UtcTime};
+use const_oid::AssociatedOid;
+use der::asn1::{GeneralizedTime, OctetString, Uint, UtcTime};
 use der::{DateTime, Encode};
 use signature::Signer;
 use spki::{DynSignatureAlgorithmIdentifier, SignatureBitStringEncoding};
 use x509_cert::certificate::Version;
 use x509_cert::crl::{CertificateList, RevokedCert, TbsCertList};
+use x509_cert::ext::pkix::{CrlNumber, CrlReason};
+use x509_cert::ext::Extension;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::time::Time;
 
-use crate::crypto::CaSigningKey;
 use crate::db::repo;
 use crate::error::{AppError, AppResult};
-use crate::http::Shared;
+use crate::http::ocsp::crl_reason;
+use crate::http::{blocking, Shared};
 
 const CT_CRL: &str = "application/pkix-crl";
-const CRL_LIFETIME_SECS: u64 = 24 * 3600;
 
 /// `GET /crl/{ca}`: the current CRL in DER form.
 pub async fn crl(State(state): State<Shared>, Path(ca): Path<String>) -> Response {
@@ -38,7 +40,8 @@ async fn build_crl(state: &Shared, ca_id: &str) -> AppResult<Vec<u8>> {
     let ca = state
         .cas
         .get(ca_id)
-        .ok_or_else(|| AppError::NotFound(format!("unknown CA '{ca_id}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("unknown CA '{ca_id}'")))?
+        .clone();
 
     let revoked_rows = repo::list_revoked(&state.db, ca_id).await?;
     let now = SystemTime::now();
@@ -58,48 +61,88 @@ async fn build_crl(state: &Shared, ca_id: &str) -> AppResult<Vec<u8>> {
             .map(to_time)
             .transpose()?
             .unwrap_or(to_time(now)?);
+        // reasonCode is omitted for `unspecified` (RFC 5280 5.3.1).
+        let crl_entry_extensions = match row.reason.and_then(crl_reason) {
+            Some(reason) if reason != CrlReason::Unspecified => Some(vec![extension(&reason)?]),
+            _ => None,
+        };
         revoked_certificates.push(RevokedCert {
             serial_number,
             revocation_date,
-            crl_entry_extensions: None,
+            crl_entry_extensions,
         });
     }
 
-    let signer = CaSigningKey::new(ca.private_key.clone());
-    let signature_algorithm = signer
-        .signature_algorithm_identifier()
-        .map_err(|e| AppError::crypto(format!("CRL signature alg: {e}")))?;
+    let lifetime = Duration::from_secs(ca.crl_lifetime_hours.max(1) * 3600);
+    // RFC 5280 5.2 requires both extensions. The CRL is regenerated on every
+    // request, so the number is derived from the clock to stay monotonic.
+    let unix_secs = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let crl_number = CrlNumber(
+        Uint::new(&unix_secs.to_be_bytes())
+            .map_err(|e| AppError::crypto(format!("CRL number: {e}")))?,
+    );
+    let crl_extensions = vec![
+        extension(&ca.authority_key_identifier()?)?,
+        extension(&crl_number)?,
+    ];
 
-    let tbs = TbsCertList {
-        version: Version::V2,
-        signature: signature_algorithm.clone(),
-        issuer: ca.cert.tbs_certificate.subject.clone(),
-        this_update: to_time(now)?,
-        next_update: Some(to_time(now + Duration::from_secs(CRL_LIFETIME_SECS))?),
-        revoked_certificates: if revoked_certificates.is_empty() {
-            None
-        } else {
-            Some(revoked_certificates)
-        },
-        crl_extensions: None,
-    };
+    let this_update = to_time(now)?;
+    let next_update = to_time(now + lifetime)?;
 
-    let tbs_der = tbs
+    blocking(move || {
+        let signer = &ca.signing_key;
+        let signature_algorithm = signer
+            .signature_algorithm_identifier()
+            .map_err(|e| AppError::crypto(format!("CRL signature alg: {e}")))?;
+
+        let tbs = TbsCertList {
+            version: Version::V2,
+            signature: signature_algorithm.clone(),
+            issuer: ca.cert.tbs_certificate.subject.clone(),
+            this_update,
+            next_update: Some(next_update),
+            revoked_certificates: if revoked_certificates.is_empty() {
+                None
+            } else {
+                Some(revoked_certificates)
+            },
+            crl_extensions: Some(crl_extensions),
+        };
+
+        let tbs_der = tbs
+            .to_der()
+            .map_err(|e| AppError::crypto(format!("encode TBS CRL: {e}")))?;
+        let signature = signer
+            .try_sign(&tbs_der)
+            .map_err(|e| AppError::crypto(format!("sign CRL: {e}")))?
+            .to_bitstring()
+            .map_err(|e| AppError::crypto(format!("encode CRL signature: {e}")))?;
+
+        let crl = CertificateList {
+            tbs_cert_list: tbs,
+            signature_algorithm,
+            signature,
+        };
+        crl.to_der()
+            .map_err(|e| AppError::crypto(format!("encode CRL: {e}")))
+    })
+    .await
+}
+
+/// Wrap a value as a non-critical X.509 extension.
+fn extension<T: AssociatedOid + Encode>(value: &T) -> AppResult<Extension> {
+    let der = value
         .to_der()
-        .map_err(|e| AppError::crypto(format!("encode TBS CRL: {e}")))?;
-    let signature = signer
-        .try_sign(&tbs_der)
-        .map_err(|e| AppError::crypto(format!("sign CRL: {e}")))?
-        .to_bitstring()
-        .map_err(|e| AppError::crypto(format!("encode CRL signature: {e}")))?;
-
-    let crl = CertificateList {
-        tbs_cert_list: tbs,
-        signature_algorithm,
-        signature,
-    };
-    crl.to_der()
-        .map_err(|e| AppError::crypto(format!("encode CRL: {e}")))
+        .map_err(|e| AppError::crypto(format!("encode CRL extension: {e}")))?;
+    Ok(Extension {
+        extn_id: T::OID,
+        critical: false,
+        extn_value: OctetString::new(der)
+            .map_err(|e| AppError::crypto(format!("encode CRL extension: {e}")))?,
+    })
 }
 
 fn to_time(st: SystemTime) -> AppResult<Time> {

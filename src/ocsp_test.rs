@@ -143,8 +143,15 @@ async fn ocsp_good_then_revoked_and_crl() {
         CertStatus::Unknown(_)
     ));
 
+    // A known serial asked about under a different issuer is "unknown": the
+    // responder only vouches for certificates of its own CA.
+    assert!(matches!(
+        ocsp_status(&state, &stranger, &cert).await,
+        CertStatus::Unknown(_)
+    ));
+
     // Revoke, then OCSP says "revoked".
-    let revoked = repo::revoke(&state.db, "default", &serial, 0, "2026-07-28T00:00:00Z")
+    let revoked = repo::revoke(&state.db, "default", &serial, 1, "2026-07-28T00:00:00Z")
         .await
         .unwrap();
     assert!(revoked);
@@ -158,6 +165,11 @@ async fn ocsp_good_then_revoked_and_crl() {
     assert_eq!(resp.status().as_u16(), 200);
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let list = CertificateList::from_der(&body).unwrap();
+    // RFC 5280 requires the AKI and CRL number extensions.
+    assert_eq!(
+        list.tbs_cert_list.crl_extensions.as_ref().map(|e| e.len()),
+        Some(2)
+    );
     let revoked_serials: Vec<String> = list
         .tbs_cert_list
         .revoked_certificates
