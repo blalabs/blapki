@@ -6,7 +6,7 @@
 
 use cms::content_info::ContentInfo;
 use der::Encode;
-use x509_cert::{Certificate, PkiPath};
+use x509_cert::Certificate;
 
 use crate::crypto::der_err;
 use crate::error::AppResult;
@@ -14,12 +14,5 @@ use crate::error::AppResult;
 /// DER-encode a single certificate as a certs-only PKCS#7 message.
 pub fn certs_only(cert: &Certificate) -> AppResult<Vec<u8>> {
     let ci = ContentInfo::try_from(cert.clone()).map_err(der_err)?;
-    ci.to_der().map_err(der_err)
-}
-
-/// DER-encode a certificate chain as a certs-only PKCS#7 message.
-pub fn chain_only(chain: &[Certificate]) -> AppResult<Vec<u8>> {
-    let path: PkiPath = chain.to_vec();
-    let ci = ContentInfo::try_from(path).map_err(der_err)?;
     ci.to_der().map_err(der_err)
 }

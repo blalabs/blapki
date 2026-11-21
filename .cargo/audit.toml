@@ -1,0 +1,10 @@
+# cargo-audit configuration.
+[advisories]
+ignore = [
+    # rsa "Marvin" timing side channel in PKCS#1 v1.5 decryption. The fixed
+    # release (rsa 0.10) needs the der-0.8 generation, which cms and x509-cert
+    # do not support yet. Mitigations in place: blinded decryption and implicit
+    # rejection in crypto/envelope.rs, so there is no explicit padding oracle.
+    # Remove this entry when the RustCrypto stack is upgraded.
+    "RUSTSEC-2023-0071",
+]

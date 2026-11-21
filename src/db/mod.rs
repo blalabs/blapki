@@ -54,7 +54,7 @@ pub async fn connect(url: &str) -> AppResult<AnyPool> {
 /// Create tables if they do not yet exist.
 pub async fn migrate(pool: &AnyPool) -> AppResult<()> {
     for stmt in SCHEMA {
-        sqlx::query(stmt).execute(pool).await?;
+        sqlx::query(*stmt).execute(pool).await?;
     }
     Ok(())
 }

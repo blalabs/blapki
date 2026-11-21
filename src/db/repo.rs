@@ -1,8 +1,6 @@
 //! Repository functions over the issued-certificate and transaction tables.
 
-use std::borrow::Cow;
-
-use sqlx::{AnyPool, Row};
+use sqlx::{AnyPool, AssertSqlSafe, Row};
 
 use crate::error::AppResult;
 
@@ -10,16 +8,20 @@ use crate::error::AppResult;
 ///
 /// The sqlx `Any` driver hands SQL to the backend untouched. SQLite and MySQL
 /// take `?`, but Postgres only understands numbered `$1` placeholders.
-fn sql<'a>(pool: &AnyPool, query: &'a str) -> Cow<'a, str> {
+///
+/// Every query passed here is a string literal from this module; only its
+/// placeholders are rewritten, never with caller-supplied data, which is what
+/// `AssertSqlSafe` attests.
+fn sql(pool: &AnyPool, query: &'static str) -> AssertSqlSafe<String> {
     if pool
         .connect_options()
         .database_url
         .scheme()
         .starts_with("postgres")
     {
-        Cow::Owned(numbered_placeholders(query))
+        AssertSqlSafe(numbered_placeholders(query))
     } else {
-        Cow::Borrowed(query)
+        AssertSqlSafe(query.to_owned())
     }
 }
 
@@ -68,7 +70,7 @@ pub struct IssuedCertificate {
 
 /// Insert a newly issued certificate.
 pub async fn insert_issued(pool: &AnyPool, cert: &IssuedCertificate) -> AppResult<()> {
-    sqlx::query(&sql(
+    sqlx::query(sql(
         pool,
         "INSERT INTO issued_certificate
          (serial, ca_id, subject, not_before, not_after, der_b64, thumbprint_sha1,
@@ -109,7 +111,7 @@ pub async fn status_by_serial(
     ca_id: &str,
     serial: &str,
 ) -> AppResult<RevocationStatus> {
-    let row = sqlx::query(&sql(
+    let row = sqlx::query(sql(
         pool,
         "SELECT status, revoked_at, revocation_reason
          FROM issued_certificate WHERE ca_id = ? AND serial = ?",
@@ -144,7 +146,7 @@ pub struct RevokedEntry {
 
 /// List all revoked certificates for a CA.
 pub async fn list_revoked(pool: &AnyPool, ca_id: &str) -> AppResult<Vec<RevokedEntry>> {
-    let rows = sqlx::query(&sql(
+    let rows = sqlx::query(sql(
         pool,
         "SELECT serial, revoked_at, revocation_reason
          FROM issued_certificate WHERE ca_id = ? AND status = ?",
@@ -172,7 +174,7 @@ pub async fn revoke(
     reason: i64,
     revoked_at: &str,
 ) -> AppResult<bool> {
-    let result = sqlx::query(&sql(
+    let result = sqlx::query(sql(
         pool,
         "UPDATE issued_certificate
          SET status = ?, revoked_at = ?, revocation_reason = ?
@@ -201,7 +203,7 @@ pub async fn record_transaction(
     // Upsert by transaction id. The id is chosen by the (unauthenticated)
     // client, so a later failed attempt must never overwrite the record of a
     // transaction that already produced a certificate.
-    let existing = sqlx::query(&sql(
+    let existing = sqlx::query(sql(
         pool,
         "SELECT transaction_id FROM scep_transaction WHERE transaction_id = ?",
     ))
@@ -209,7 +211,7 @@ pub async fn record_transaction(
     .fetch_optional(pool)
     .await?;
     if existing.is_some() {
-        sqlx::query(&sql(
+        sqlx::query(sql(
             pool,
             "UPDATE scep_transaction SET status = ?, message_type = ?
              WHERE transaction_id = ? AND status <> ?",
@@ -221,7 +223,7 @@ pub async fn record_transaction(
         .execute(pool)
         .await?;
     } else {
-        sqlx::query(&sql(pool, "INSERT INTO scep_transaction (transaction_id, profile, status, message_type, created_at)
+        sqlx::query(sql(pool, "INSERT INTO scep_transaction (transaction_id, profile, status, message_type, created_at)
              VALUES (?, ?, ?, ?, ?)"))
         .bind(transaction_id)
         .bind(profile)
