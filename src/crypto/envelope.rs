@@ -273,7 +273,6 @@ fn content_key_len(alg: ObjectIdentifier) -> AppResult<usize> {
         oids::ID_AES_192_CBC => 24,
         oids::ID_AES_256_CBC => 32,
         oids::ID_DES_EDE3_CBC => 24,
-        oids::ID_DES_CBC => 8,
         other => {
             return Err(AppError::crypto(format!(
                 "unsupported content encryption algorithm {other}"
@@ -318,10 +317,6 @@ fn decrypt_symmetric(
         }
         oids::ID_DES_EDE3_CBC => {
             let c = cbc::Decryptor::<des::TdesEde3>::new_from_slices(key, iv).map_err(bad_key)?;
-            unpad(c.decrypt_padded_vec_mut::<Pkcs7>(ciphertext))
-        }
-        oids::ID_DES_CBC => {
-            let c = cbc::Decryptor::<des::Des>::new_from_slices(key, iv).map_err(bad_key)?;
             unpad(c.decrypt_padded_vec_mut::<Pkcs7>(ciphertext))
         }
         other => Err(AppError::crypto(format!(

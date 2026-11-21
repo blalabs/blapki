@@ -52,8 +52,8 @@ pub mod oids {
     /// des-ede3-cbc (3DES)
     pub const ID_DES_EDE3_CBC: ObjectIdentifier =
         ObjectIdentifier::new_unwrap("1.2.840.113549.3.7");
-    /// des-cbc (single DES, legacy)
-    pub const ID_DES_CBC: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.7");
+    // Single DES (56-bit) is deliberately not supported: a captured request
+    // would give up its challenge password to a brute-force search.
 }
 
 /// Build a digest `AlgorithmIdentifier` (parameters absent, per modern CMS).
